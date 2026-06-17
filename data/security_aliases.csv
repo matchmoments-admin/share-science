@@ -1,0 +1,16 @@
+alias,security_id,kind
+apple,AAPL.US,name
+$aapl,AAPL.US,cashtag
+microsoft,MSFT.US,name
+$msft,MSFT.US,cashtag
+nvidia,NVDA.US,name
+$nvda,NVDA.US,cashtag
+vanguard s&p 500,VOO.US,name
+$voo,VOO.US,cashtag
+spdr s&p 500,SPY.US,name
+$spy,SPY.US,cashtag
+commonwealth bank,CBA.AU,name
+commbank,CBA.AU,name
+bhp,BHP.AU,name
+ishares s&p 500,IVV.AU,name
+betashares australia 200,A200.AU,name

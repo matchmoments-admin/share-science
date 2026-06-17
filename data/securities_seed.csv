@@ -1,0 +1,10 @@
+id,ticker,exchange,isin,figi,name,sec_type,domicile,currency,sector,is_active
+AAPL.US,AAPL,XNAS,US0378331005,,Apple Inc.,share,US,USD,Technology,1
+MSFT.US,MSFT,XNAS,US5949181045,,Microsoft Corporation,share,US,USD,Technology,1
+NVDA.US,NVDA,XNAS,US67066G1040,,NVIDIA Corporation,share,US,USD,Technology,1
+VOO.US,VOO,ARCX,US9229083632,,Vanguard S&P 500 ETF,etf,US,USD,Index,1
+SPY.US,SPY,ARCX,US78462F1030,,SPDR S&P 500 ETF Trust,etf,US,USD,Index,1
+CBA.AU,CBA,XASX,AU000000CBA7,,Commonwealth Bank of Australia,share,AU,AUD,Financials,1
+BHP.AU,BHP,XASX,AU000000BHP4,,BHP Group Limited,share,AU,AUD,Materials,1
+IVV.AU,IVV,XASX,AU000000IVV9,,iShares S&P 500 ETF (AU),etf,AU,AUD,Index,1
+A200.AU,A200,XASX,AU0000XVGZA3,,Betashares Australia 200 ETF,etf,AU,AUD,Index,1

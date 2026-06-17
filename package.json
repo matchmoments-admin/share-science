@@ -1,0 +1,23 @@
+{
+  "name": "share-science",
+  "version": "0.0.0",
+  "private": true,
+  "type": "module",
+  "description": "Empirical tip-accountability engine — aggregate public share tips, verify by outcome, publish a confidence-adjusted track record. General information only, not financial advice.",
+  "scripts": {
+    "typecheck": "tsc --noEmit",
+    "test": "node --experimental-strip-types --test scripts/stats.test.mjs",
+    "dev": "wrangler dev",
+    "deploy": "wrangler deploy",
+    "migrate:local": "wrangler d1 execute share-science-db --local --file=migrations/0001_init.sql && wrangler d1 execute share-science-db --local --file=migrations/0002_seed.sql",
+    "migrate:remote": "wrangler d1 execute share-science-db --remote --file=migrations/0001_init.sql && wrangler d1 execute share-science-db --remote --file=migrations/0002_seed.sql"
+  },
+  "dependencies": {
+    "@anthropic-ai/sdk": "^0.68.0"
+  },
+  "devDependencies": {
+    "@cloudflare/workers-types": "^4.20250109.0",
+    "typescript": "^5.7.3",
+    "wrangler": "^4.0.0"
+  }
+}

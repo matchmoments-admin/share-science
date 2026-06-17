@@ -1,0 +1,43 @@
+# share-science — Cloudflare Worker config.
+# Resource IDs are placeholders: provision with the commands in README.md, then paste the
+# returned IDs here. Local runtime is deploy-only on macOS 12.6 (workerd won't run) — verify
+# with `npm run typecheck` then deploy.
+
+name = "share-science"
+main = "src/index.ts"
+compatibility_date = "2025-01-09"
+compatibility_flags = ["nodejs_compat"]
+
+# Default vars. PUBLIC_PRICES gates raw-price display: keep "off" to stay on the EODHD
+# personal tier (publish derived returns/alpha only — see LEGAL.md + the cost-cliff note).
+[vars]
+PUBLIC_PRICES = "off"
+MAX_DAILY_COST_CENTS = "500"
+
+[[d1_databases]]
+binding = "DB"
+database_name = "share-science-db"
+database_id = "7e0c1426-fee8-43da-af7d-ffc1fdedd5a7"
+
+[[r2_buckets]]
+binding = "RAW_MEDIA"
+bucket_name = "share-science-raw-media"
+
+[[kv_namespaces]]
+binding = "KV"
+id = "b4f6d1ce4fe1438388d57289d8165ee5"
+
+[[queues.producers]]
+binding = "TIP_INGEST"
+queue = "tips-ingest"
+
+[[queues.consumers]]
+queue = "tips-ingest"
+max_batch_size = 5
+max_retries = 3
+dead_letter_queue = "tips-ingest-dlq"
+
+# All recurring jobs run from scheduled() and branch on controller.cron.
+# hourly = producers (RSS/Bluesky poll); 06:00 UTC daily = valuation/track + ratings; Mon 07:00 UTC = weekly digest.
+[triggers]
+crons = ["0 * * * *", "0 6 * * *", "0 7 * * 1"]

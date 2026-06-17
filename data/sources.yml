@@ -1,0 +1,20 @@
+# Curated tip sources. Seed the `sources` table from this. Keep small and named at v1.
+# medium: podcast | x | bluesky | blog | web | youtube
+- id: example-podcast
+  name: Example Investing Podcast
+  medium: podcast
+  handle: example-investing
+  home_url: https://example.com/podcast
+  # podcast feed (Podcast Index lookup) wired in Slice 4
+
+- id: example-bluesky
+  name: Example Finance (Bluesky)
+  medium: bluesky
+  handle: example.bsky.social
+  home_url: https://bsky.app/profile/example.bsky.social
+
+- id: founder-manual
+  name: Manual entry (founder)
+  medium: web
+  handle: manual
+  home_url: ""
