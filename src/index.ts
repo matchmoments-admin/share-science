@@ -95,6 +95,16 @@ async function handleIngestProducer(req: Request, env: Env): Promise<Response> {
 
 /** Consume one queued item: one multi-tip extraction → resolve + insert each tip. */
 async function consumeOne(env: Env, m: TipIngestMessage): Promise<void> {
+  // Idempotency / no-re-pay guard: if a prior delivery already extracted (or dropped) this item, a
+  // queue retry must NOT pay for the LLM call again. The paid `extractTips` below is the only
+  // metered work, so this guard + the early status mark together bound extraction cost to once-per-item.
+  const cur = await env.DB.prepare('SELECT status FROM ingest_items WHERE id = ?')
+    .bind(m.ingest_item_id).first<{ status: string }>();
+  if (cur && (cur.status === 'extracted' || cur.status === 'dropped')) {
+    await logOps(env, 'extract', { ingest_item: m.ingest_item_id, skipped: 'already_processed' });
+    return;
+  }
+
   if (!(await withinBudget(env, EXTRACT_BUDGET_CENTS))) {
     await env.DB.prepare(`UPDATE ingest_items SET status = 'review' WHERE id = ?`).bind(m.ingest_item_id).run();
     await logOps(env, 'extract', { skipped: 'over_budget', ingest_item: m.ingest_item_id });
@@ -104,33 +114,38 @@ async function consumeOne(env: Env, m: TipIngestMessage): Promise<void> {
   const { tips, costCents } = await extractTips(env, m.text);
   await recordSpend(env, costCents);
 
-  if (tips.length === 0) {
-    await env.DB.prepare(`UPDATE ingest_items SET status = 'dropped' WHERE id = ?`).bind(m.ingest_item_id).run();
-    return;
-  }
+  // Mark the item processed IMMEDIATELY after paying, BEFORE the resolve/insert loop — so any later
+  // failure + queue retry hits the guard above instead of re-running (and re-paying for) extraction.
+  await env.DB.prepare(`UPDATE ingest_items SET status = ? WHERE id = ?`)
+    .bind(tips.length === 0 ? 'dropped' : 'extracted', m.ingest_item_id).run();
+  if (tips.length === 0) return;
 
   let resolved = 0;
   let lazyBudget = MAX_LAZY_LOOKUPS_PER_ITEM;
   const model = env.EXTRACT_MODEL || 'claude-opus-4-8';
   for (const tip of tips.slice(0, MAX_TIPS_PER_ITEM)) {
-    const { security, reason } = await resolveSecurity(env, tip, lazyBudget > 0);
-    if (reason === 'eodhd_lazy') lazyBudget--;
-    if (security) resolved++;
-    await env.DB.prepare(
-      `INSERT OR IGNORE INTO tips
-         (id, security_id, source_id, ingest_item_id, direction, conviction, horizon, tip_type,
-          horizon_days_target, target_price_raw, target_currency, rationale, evidence_span, speaker,
-          confidence, extractor, detected_at, status, created_at)
-       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
-    ).bind(
-      uid(), security?.id ?? null, m.source_id, m.ingest_item_id, tip.direction, tip.conviction, tip.horizon,
-      tip.tip_type, tip.horizon_days_target, tip.target_price, tip.target_currency, tip.rationale,
-      tip.evidence_span, tip.speaker, tip.confidence, model, m.detected_at,
-      security ? 'resolved' : 'review', nowISO(),
-    ).run();
+    try {
+      const { security, reason } = await resolveSecurity(env, tip, lazyBudget > 0);
+      if (reason === 'eodhd_lazy') lazyBudget--;
+      if (security) resolved++;
+      await env.DB.prepare(
+        `INSERT OR IGNORE INTO tips
+           (id, security_id, source_id, ingest_item_id, direction, conviction, horizon, tip_type,
+            horizon_days_target, target_price_raw, target_currency, rationale, evidence_span, speaker,
+            confidence, extractor, detected_at, status, created_at)
+         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+      ).bind(
+        uid(), security?.id ?? null, m.source_id, m.ingest_item_id, tip.direction, tip.conviction, tip.horizon,
+        tip.tip_type, tip.horizon_days_target, tip.target_price, tip.target_currency, tip.rationale,
+        tip.evidence_span, tip.speaker, tip.confidence, model, m.detected_at,
+        security ? 'resolved' : 'review', nowISO(),
+      ).run();
+    } catch (err) {
+      // One bad tip is logged and skipped — never throw the consumer into a retry (which would re-pay).
+      await logOps(env, 'error', { at: 'consumeOne.tip', ingest_item: m.ingest_item_id, err: String(err) });
+    }
   }
 
-  await env.DB.prepare(`UPDATE ingest_items SET status = 'extracted' WHERE id = ?`).bind(m.ingest_item_id).run();
   await logOps(env, 'extract', { ingest_item: m.ingest_item_id, tips: tips.length, resolved });
 }
 
