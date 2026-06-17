@@ -7,7 +7,8 @@
  */
 import type { Env } from '../types.js';
 import { nowISO, logOps } from './db.js';
-import { wilson, mean, median, stdev } from './stats.js';
+import { wilson, mean, median, stdev, convictionWeight, weightedMean } from './stats.js';
+import { primaryHorizon, type TipType } from './horizon.js';
 
 const ESTABLISHED_MIN_TIPS = 20;
 
@@ -17,6 +18,9 @@ interface SettledRow {
   excess_pct: number;
   is_hit: number;
   tip_id: string;
+  tip_type: string | null;
+  horizon_days_target: number | null;
+  conviction: string | null;
 }
 
 interface RatingRow {
@@ -37,10 +41,69 @@ interface RatingRow {
   worst_tip_id: string | null;
 }
 
+/** Equal-weighted rating row for a group of settled tips under one dimension. */
+function buildRow(source_id: string, dimension: string, rs: SettledRow[]): RatingRow {
+  const excesses = rs.map((r) => r.excess_pct);
+  const nHits = rs.reduce((a, r) => a + (r.is_hit ? 1 : 0), 0);
+  const w = wilson(nHits, rs.length);
+  const best = rs.reduce((a, b) => (b.excess_pct > a.excess_pct ? b : a));
+  const worst = rs.reduce((a, b) => (b.excess_pct < a.excess_pct ? b : a));
+  return {
+    source_id,
+    dimension,
+    n_tips: rs.length,
+    n_hits: nHits,
+    hit_rate: nHits / rs.length,
+    avg_excess_pct: mean(excesses),
+    median_excess_pct: median(excesses),
+    stdev_excess_pct: stdev(excesses),
+    rating_score: 100 * (nHits / rs.length),
+    score_lower: 100 * w.lower,
+    score_upper: 100 * w.upper,
+    tier: rs.length >= ESTABLISHED_MIN_TIPS ? 'established' : 'provisional',
+    rank: 0, // assigned below
+    best_tip_id: best.tip_id,
+    worst_tip_id: worst.tip_id,
+  };
+}
+
+/**
+ * Conviction-weighted row: hit rate + avg alpha weighted by stated conviction (low/med/high = 1/2/3).
+ * The CONFIDENCE interval (score_lower) stays on the RAW sample so weighting can't manufacture
+ * statistical confidence — it only reflects that high-conviction calls count for more.
+ */
+function buildWeightedRow(source_id: string, dimension: string, rs: SettledRow[]): RatingRow {
+  const excesses = rs.map((r) => r.excess_pct);
+  const ws = rs.map((r) => convictionWeight(r.conviction));
+  const wHitRate = weightedMean(rs.map((r) => (r.is_hit ? 1 : 0)), ws);
+  const nHits = rs.reduce((a, r) => a + (r.is_hit ? 1 : 0), 0);
+  const w = wilson(nHits, rs.length); // honest CI on raw n
+  const best = rs.reduce((a, b) => (b.excess_pct > a.excess_pct ? b : a));
+  const worst = rs.reduce((a, b) => (b.excess_pct < a.excess_pct ? b : a));
+  return {
+    source_id,
+    dimension,
+    n_tips: rs.length,
+    n_hits: nHits,
+    hit_rate: wHitRate,
+    avg_excess_pct: weightedMean(excesses, ws),
+    median_excess_pct: median(excesses),
+    stdev_excess_pct: stdev(excesses),
+    rating_score: 100 * wHitRate,
+    score_lower: 100 * w.lower,
+    score_upper: 100 * w.upper,
+    tier: rs.length >= ESTABLISHED_MIN_TIPS ? 'established' : 'provisional',
+    rank: 0,
+    best_tip_id: best.tip_id,
+    worst_tip_id: worst.tip_id,
+  };
+}
+
 export async function recomputeRatings(env: Env): Promise<{ rows: number; dimensions: number }> {
   const RATING_ROW_CAP = 100_000;
   const res = await env.DB.prepare(
-    `SELECT t.source_id, tr.horizon_days, tr.excess_pct, tr.is_hit, tr.tip_id
+    `SELECT t.source_id, tr.horizon_days, tr.excess_pct, tr.is_hit, tr.tip_id,
+            t.tip_type, t.horizon_days_target, t.conviction
        FROM tip_returns tr JOIN tips t ON t.id = tr.tip_id
       WHERE tr.is_hit IS NOT NULL AND tr.excess_pct IS NOT NULL
       LIMIT ?`,
@@ -48,40 +111,40 @@ export async function recomputeRatings(env: Env): Promise<{ rows: number; dimens
   const settled = res.results ?? [];
   if (settled.length >= RATING_ROW_CAP) await logOps(env, 'error', { at: 'recomputeRatings', warn: 'row_cap_hit', cap: RATING_ROW_CAP });
 
-  // Group by (source_id, horizon).
+  // Group by (source_id, horizon) for the standard horizon dimensions.
   const groups = new Map<string, SettledRow[]>();
+  // Per tip: collect its settled rows so we can pick the one at its PRIMARY horizon.
+  const byTip = new Map<string, SettledRow[]>();
   for (const r of settled) {
     const key = `${r.source_id}|${r.horizon_days}`;
     (groups.get(key) ?? groups.set(key, []).get(key)!).push(r);
+    (byTip.get(r.tip_id) ?? byTip.set(r.tip_id, []).get(r.tip_id)!).push(r);
   }
 
-  // Build a rating row per group.
   const rows: RatingRow[] = [];
+  // Standard horizon dimensions (unchanged, backward-compatible).
   for (const [key, rs] of groups) {
     const [source_id, horizonStr] = key.split('|');
-    const excesses = rs.map((r) => r.excess_pct);
-    const nHits = rs.reduce((a, r) => a + (r.is_hit ? 1 : 0), 0);
-    const w = wilson(nHits, rs.length);
-    const best = rs.reduce((a, b) => (b.excess_pct > a.excess_pct ? b : a));
-    const worst = rs.reduce((a, b) => (b.excess_pct < a.excess_pct ? b : a));
-    rows.push({
-      source_id,
-      dimension: `horizon:${horizonStr}`,
-      n_tips: rs.length,
-      n_hits: nHits,
-      hit_rate: nHits / rs.length,
-      avg_excess_pct: mean(excesses),
-      median_excess_pct: median(excesses),
-      stdev_excess_pct: stdev(excesses),
-      rating_score: 100 * (nHits / rs.length),
-      score_lower: 100 * w.lower,
-      score_upper: 100 * w.upper,
-      tier: rs.length >= ESTABLISHED_MIN_TIPS ? 'established' : 'provisional',
-      rank: 0, // assigned below
-      best_tip_id: best.tip_id,
-      worst_tip_id: worst.tip_id,
-    });
+    rows.push(buildRow(source_id, `horizon:${horizonStr}`, rs));
   }
+
+  // PRIMARY dimension: score each tip on the window nearest its stated horizon (Slice 1).
+  const primaryBySource = new Map<string, SettledRow[]>();
+  for (const rs of byTip.values()) {
+    const want = primaryHorizon(rs[0].tip_type as TipType | null, rs[0].horizon_days_target);
+    const picked = rs.find((r) => r.horizon_days === want);
+    if (!picked) continue; // the tip's primary window hasn't settled yet
+    (primaryBySource.get(picked.source_id) ?? primaryBySource.set(picked.source_id, []).get(picked.source_id)!).push(picked);
+  }
+  for (const [source_id, rs] of primaryBySource) rows.push(buildRow(source_id, 'primary', rs));
+
+  // CONVICTION-weighted dimension: weight the 90-day rows by stated conviction (Slice 5).
+  const convBySource = new Map<string, SettledRow[]>();
+  for (const r of settled) {
+    if (r.horizon_days !== 90) continue;
+    (convBySource.get(r.source_id) ?? convBySource.set(r.source_id, []).get(r.source_id)!).push(r);
+  }
+  for (const [source_id, rs] of convBySource) rows.push(buildWeightedRow(source_id, 'conviction:90', rs));
 
   // Rank within each dimension: established first, then by Wilson lower bound desc.
   const byDim = new Map<string, RatingRow[]>();

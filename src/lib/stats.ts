@@ -48,3 +48,21 @@ export function stdev(xs: number[]): number {
   const m = mean(xs);
   return Math.sqrt(xs.reduce((a, b) => a + (b - m) * (b - m), 0) / (xs.length - 1));
 }
+
+/** Conviction → integer weight for the conviction-weighted leaderboard. Unknown ≈ low. */
+export function convictionWeight(conviction: string | null | undefined): number {
+  if (conviction === 'high') return 3;
+  if (conviction === 'medium') return 2;
+  return 1; // low or unknown
+}
+
+/** Weighted arithmetic mean. Falls back to 0 when the weights sum to 0. */
+export function weightedMean(xs: number[], ws: number[]): number {
+  let num = 0;
+  let den = 0;
+  for (let i = 0; i < xs.length; i++) {
+    num += xs[i] * ws[i];
+    den += ws[i];
+  }
+  return den === 0 ? 0 : num / den;
+}

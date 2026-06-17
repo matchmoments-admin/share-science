@@ -7,6 +7,17 @@ import { assertNoRawPrices } from './advisory.js';
 import { layout, escapeHtml, pctCell, score, asOf, HYPOTHETICAL_NOTE } from './render.js';
 
 const DEFAULT_DIM = 'horizon:90';
+// Publishable leaderboard dimensions. Default stays horizon:90 for backward-compat; `primary`
+// scores each tip on its own stated horizon; `conviction:90` weights by stated conviction.
+const ALLOWED_DIMS = ['horizon:90', 'horizon:30', 'horizon:365', 'primary', 'conviction:90'];
+const DIM_LABELS: Record<string, string> = {
+  'horizon:90': '90-day', 'horizon:30': '30-day', 'horizon:365': '365-day',
+  primary: 'Primary horizon', 'conviction:90': 'Conviction-weighted (90d)',
+};
+
+function resolveDim(dim: string | null | undefined): string {
+  return dim && ALLOWED_DIMS.includes(dim) ? dim : DEFAULT_DIM;
+}
 
 function json(body: unknown, status = 200): Response {
   return new Response(JSON.stringify(body), {
@@ -16,18 +27,23 @@ function json(body: unknown, status = 200): Response {
 }
 
 // ── Leaderboard ──────────────────────────────────────────────────────
-export async function leaderboard(env: Env): Promise<Response> {
+export async function leaderboard(env: Env, dimParam?: string | null): Promise<Response> {
+  const dim = resolveDim(dimParam);
   const rows = (await env.DB.prepare(
     `SELECT sr.source_id, s.name AS source_name, sr.tier, sr.n_tips, sr.hit_rate,
             sr.avg_excess_pct, sr.rating_score, sr.score_lower, sr.rank, sr.updated_at
        FROM source_ratings sr JOIN sources s ON s.id = sr.source_id
       WHERE sr.dimension = ? ORDER BY sr.rank ASC`,
-  ).bind(DEFAULT_DIM).all()).results ?? [];
+  ).bind(dim).all()).results ?? [];
   assertNoRawPrices(env, rows);
+
+  const switcher = `<p class="muted">View: ${ALLOWED_DIMS.map((d) =>
+    d === dim ? `<b>${escapeHtml(DIM_LABELS[d])}</b>` : `<a href="/leaderboard?dim=${encodeURIComponent(d)}">${escapeHtml(DIM_LABELS[d])}</a>`,
+  ).join(' · ')}</p>`;
 
   const updatedAt = (rows[0] as any)?.updated_at as string | undefined;
   const body = rows.length === 0
-    ? '<p class="muted">No rated sources yet — outcomes accrue as tips reach their 90-day mark.</p>'
+    ? '<p class="muted">No rated sources yet on this view — outcomes accrue as tips reach their horizon.</p>'
     : `<table><thead><tr><th>#</th><th>Source</th><th>Tier</th><th>Tips</th><th>Hit rate</th>
          <th>Avg alpha</th><th>Score (lower bound)</th></tr></thead><tbody>
        ${rows.map((r: any) => `<tr>
@@ -41,25 +57,27 @@ export async function leaderboard(env: Env): Promise<Response> {
        </tr>`).join('')}</tbody></table>
        <p class="muted">Ranked by the lower bound of a 95% confidence interval on hit rate (alpha vs the market
        benchmark), established sources (≥20 settled tips) above provisional — so a small lucky streak
-       can't top a long track record. Horizon: 90 days${updatedAt ? ` · ${asOf(updatedAt)}` : ''}.
+       can't top a long track record. View: ${escapeHtml(DIM_LABELS[dim])}${updatedAt ? ` · ${asOf(updatedAt)}` : ''}.
        <a href="/methodology">How this is calculated</a>.</p>
        <p class="muted">${escapeHtml(HYPOTHETICAL_NOTE)}</p>`;
 
   return layout('Tip-source leaderboard', `<h1>Who's actually right?</h1>
-    <p class="muted">A factual record of how public share tips performed vs the market. Outcomes, not advice.</p>${body}`);
+    <p class="muted">A factual record of how public share tips performed vs the market. Outcomes, not advice.</p>
+    ${switcher}${body}`);
 }
 
-export async function leaderboardJson(env: Env): Promise<Response> {
+export async function leaderboardJson(env: Env, dimParam?: string | null): Promise<Response> {
+  const dim = resolveDim(dimParam);
   const rows = (await env.DB.prepare(
     `SELECT sr.source_id, s.name AS source_name, sr.dimension, sr.tier, sr.n_tips, sr.n_hits,
             sr.hit_rate, sr.avg_excess_pct, sr.median_excess_pct, sr.rating_score, sr.score_lower,
             sr.score_upper, sr.rank, sr.updated_at
        FROM source_ratings sr JOIN sources s ON s.id = sr.source_id
       WHERE sr.dimension = ? ORDER BY sr.rank ASC`,
-  ).bind(DEFAULT_DIM).all()).results ?? [];
+  ).bind(dim).all()).results ?? [];
   assertNoRawPrices(env, rows);
   return json({
-    dimension: DEFAULT_DIM,
+    dimension: dim,
     as_of: (rows[0] as any)?.updated_at ?? null,
     hypothetical: true,
     disclaimer: HYPOTHETICAL_NOTE,
@@ -94,6 +112,18 @@ export function methodologyPage(): Response {
     <p>Sources are ranked by the <b>lower bound of a 95% confidence interval</b> on their hit rate, and
       established sources (≥20 settled tips) always rank above provisional ones. A small lucky streak
       can't top a long track record.</p>
+
+    <h2>Scoring window — keyed to the call's own horizon</h2>
+    <p>Each tip is bucketed by its stated horizon (short / swing / buy-and-hold) and scored
+      <b>primarily on the window nearest that horizon</b> — 30, 90 or 365 days. Judging a multi-year
+      thesis at 30 days, or a "this pops this week" call at a year, would be meaningless. The default
+      leaderboard view is the 90-day window; the <a href="/leaderboard?dim=primary">Primary horizon</a>
+      view scores every call on its own clock, and other windows are shown as secondary context.</p>
+
+    <h2>Conviction</h2>
+    <p>The <a href="/leaderboard?dim=conviction:90">conviction-weighted</a> view counts a source's
+      high-conviction calls for more than its throwaway mentions. The confidence interval still uses the
+      raw sample, so weighting reflects emphasis — it can't manufacture statistical certainty.</p>
 
     <h2>Survivorship — losers stay in</h2>
     <p>Delisted, acquired and failed tickers are kept in the record at their last value. Quietly dropping

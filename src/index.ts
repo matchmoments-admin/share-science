@@ -215,9 +215,9 @@ export default {
     if (url.pathname === '/api/subscribe' && req.method === 'POST') return handleSubscribe(req, env);
 
     // Public, crawlable read surface (derived returns only — assertNoRawPrices-guarded).
-    if (url.pathname === '/leaderboard') return leaderboard(env);
+    if (url.pathname === '/leaderboard') return leaderboard(env, url.searchParams.get('dim'));
     if (url.pathname === '/methodology') return methodologyPage();
-    if (url.pathname === '/api/public/leaderboard') return leaderboardJson(env);
+    if (url.pathname === '/api/public/leaderboard') return leaderboardJson(env, url.searchParams.get('dim'));
     if (url.pathname === '/api/public/nav') return navJson(env, new URL(req.url).searchParams.get('scope') || 'all');
     const m = url.pathname.match(/^\/(sources|tips|securities)\/(.+)$/);
     if (m && req.method === 'GET') {
