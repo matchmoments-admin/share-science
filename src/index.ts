@@ -16,6 +16,7 @@ import { openPendingPositions } from './lib/trade.js';
 import { valueOpenPositions } from './lib/track.js';
 import { recomputeRatings } from './lib/ratings.js';
 import { snapshotNav } from './lib/nav.js';
+import { classifyHorizon } from './lib/horizon.js';
 import { pollRssSources } from './lib/producers/rss.js';
 import { pollBlueskySources } from './lib/producers/bluesky.js';
 import { pollPodcastSources } from './lib/producers/podcast.js';
@@ -117,13 +118,14 @@ async function consumeOne(env: Env, m: TipIngestMessage): Promise<void> {
     if (security) resolved++;
     await env.DB.prepare(
       `INSERT OR IGNORE INTO tips
-         (id, security_id, source_id, ingest_item_id, direction, conviction, horizon, rationale,
-          evidence_span, speaker, confidence, extractor, detected_at, status, created_at)
-       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+         (id, security_id, source_id, ingest_item_id, direction, conviction, horizon, tip_type,
+          horizon_days_target, rationale, evidence_span, speaker, confidence, extractor, detected_at,
+          status, created_at)
+       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
     ).bind(
       uid(), security?.id ?? null, m.source_id, m.ingest_item_id, tip.direction, tip.conviction, tip.horizon,
-      tip.rationale, tip.evidence_span, tip.speaker, tip.confidence, model, m.detected_at,
-      security ? 'resolved' : 'review', nowISO(),
+      tip.tip_type, tip.horizon_days_target, tip.rationale, tip.evidence_span, tip.speaker, tip.confidence,
+      model, m.detected_at, security ? 'resolved' : 'review', nowISO(),
     ).run();
   }
 
@@ -162,6 +164,30 @@ async function handleSeedSecurities(req: Request, env: Env): Promise<Response> {
   return json(await seedExchange(env, exchange));
 }
 
+/**
+ * Admin: backfill tip_type/horizon_days_target on pre-0007 rows from their stored free-text horizon.
+ * Deterministic parser only (no LLM, no cost). Bounded by ?limit (default 200) — re-run to continue.
+ */
+async function handleBackfillTipType(req: Request, env: Env): Promise<Response> {
+  if (!authed(req, env)) return json({ error: 'unauthorized' }, 401);
+  const limit = Math.min(Math.max(Number(new URL(req.url).searchParams.get('limit')) || 200, 1), 1000);
+  const rows = (await env.DB.prepare(
+    `SELECT id, horizon FROM tips WHERE tip_type IS NULL ORDER BY created_at ASC LIMIT ?`,
+  ).bind(limit).all<{ id: string; horizon: string | null }>()).results ?? [];
+  const upd = env.DB.prepare('UPDATE tips SET tip_type = ?, horizon_days_target = ? WHERE id = ?');
+  let updated = 0;
+  for (let i = 0; i < rows.length; i += 100) {
+    const chunk = rows.slice(i, i + 100);
+    await env.DB.batch(chunk.map((r) => {
+      const { tip_type, horizon_days_target } = classifyHorizon(r.horizon);
+      return upd.bind(tip_type, horizon_days_target, r.id);
+    }));
+    updated += chunk.length;
+  }
+  await logOps(env, 'cron', { job: 'backfill-tip-type', scanned: rows.length, updated });
+  return json({ ok: true, scanned: rows.length, updated, more: rows.length === limit });
+}
+
 /** Admin: run the producer pollers on demand (same as the hourly cron). */
 async function handlePoll(req: Request, env: Env): Promise<Response> {
   if (!authed(req, env)) return json({ error: 'unauthorized' }, 401);
@@ -182,6 +208,7 @@ export default {
     if (url.pathname === '/admin/digest' && req.method === 'GET') return handleDigest(req, env);
     if (url.pathname === '/admin/seed-securities' && req.method === 'POST') return handleSeedSecurities(req, env);
     if (url.pathname === '/admin/poll' && req.method === 'POST') return handlePoll(req, env);
+    if (url.pathname === '/admin/backfill-tip-type' && req.method === 'POST') return handleBackfillTipType(req, env);
 
     // Public landing page (newsletter signup) + signup endpoint.
     if (url.pathname === '/' && (req.method === 'GET' || req.method === 'HEAD')) return landingPage(env);

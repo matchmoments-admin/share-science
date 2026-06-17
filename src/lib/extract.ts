@@ -7,6 +7,7 @@
  */
 import Anthropic from '@anthropic-ai/sdk';
 import type { Env, ExtractedTip } from '../types.js';
+import { classifyHorizon } from './horizon.js';
 
 const DEFAULT_MODEL = 'claude-opus-4-8';
 const MAX_EXTRACT_CHARS = 80_000; // ~20k tokens (~10c/call) — covers a full podcast transcript; bounds cost + injection
@@ -25,13 +26,14 @@ const TIP_ITEM = {
     company_name: { type: ['string', 'null'], description: 'Company/fund name as spoken, else null.' },
     direction: { type: 'string', enum: ['buy', 'bullish', 'sell', 'bearish', 'hold'] },
     conviction: { type: ['string', 'null'], enum: ['low', 'medium', 'high', null] },
-    horizon: { type: ['string', 'null'] },
+    horizon: { type: ['string', 'null'], description: 'Stated holding horizon as spoken (e.g. "a few months", "5 years"), else null.' },
+    tip_type: { type: ['string', 'null'], enum: ['short', 'swing', 'buy_hold', null], description: 'Bucket the horizon: short (days/intraday), swing (weeks–months), buy_hold (a year or more). null if unclear.' },
     rationale: { type: ['string', 'null'], description: 'One-sentence summary of the stated reasoning.' },
     evidence_span: { type: 'string', description: 'Verbatim quote expressing THIS view.' },
     speaker: { type: ['string', 'null'], description: 'Name of the person who made THIS specific call, if identifiable, else null.' },
     confidence: { type: 'number', description: '0..1 confidence this is a genuine, correctly-extracted call.' },
   },
-  required: ['proposed_ticker', 'exchange_hint', 'company_name', 'direction', 'conviction', 'horizon', 'rationale', 'evidence_span', 'speaker', 'confidence'],
+  required: ['proposed_ticker', 'exchange_hint', 'company_name', 'direction', 'conviction', 'horizon', 'tip_type', 'rationale', 'evidence_span', 'speaker', 'confidence'],
 };
 
 const RECORD_TIPS_TOOL: Anthropic.Tool = {
@@ -88,6 +90,8 @@ const DIRECTIONS = ['buy', 'bullish', 'sell', 'bearish', 'hold'];
 function coerce(input: unknown): ExtractedTip {
   const o = (input ?? {}) as Record<string, unknown>;
   const dir = String(o.direction ?? '');
+  const horizon = strOrNull(o.horizon);
+  const { tip_type, horizon_days_target } = classifyHorizon(horizon, strOrNull(o.tip_type));
   return {
     is_recommendation: true,
     proposed_ticker: strOrNull(o.proposed_ticker),
@@ -95,7 +99,9 @@ function coerce(input: unknown): ExtractedTip {
     company_name: strOrNull(o.company_name),
     direction: (DIRECTIONS.includes(dir) ? dir : 'hold') as ExtractedTip['direction'],
     conviction: ['low', 'medium', 'high'].includes(String(o.conviction)) ? (o.conviction as ExtractedTip['conviction']) : null,
-    horizon: strOrNull(o.horizon),
+    horizon,
+    tip_type,
+    horizon_days_target,
     rationale: strOrNull(o.rationale),
     evidence_span: typeof o.evidence_span === 'string' ? o.evidence_span : '',
     speaker: strOrNull(o.speaker),
