@@ -9,6 +9,7 @@
 import type { Env, Security } from '../types.js';
 import { nowISO, dateOnly, addDays, logOps } from './db.js';
 import { getAdjCloseAsOf, getLatestAdjClose, type PriceCache } from './prices.js';
+import { maxDrawdown, periodReturns, annualisedVol, sharpe } from './stats.js';
 
 const HORIZONS = [30, 90, 365];
 const SEC_COLS = 'id, ticker, exchange, isin, name, sec_type, domicile, currency, is_active';
@@ -99,6 +100,43 @@ async function valueOne(env: Env, pos: OpenPosition, todayISO: string, cache: Pr
     }
   }
   return false;
+}
+
+const MAX_RISK_POSITIONS_PER_RUN = 150; // bound per run; pure D1 reads, no external calls
+
+/**
+ * Recompute per-position risk metrics (max drawdown, annualised volatility, Sharpe-proxy) from the
+ * already-persisted valuations time series — NO external price calls. Bounded + idempotent: each
+ * position is recomputed at most once per day (risk_metrics_as_of guard), oldest first.
+ */
+export async function recomputeRiskMetrics(env: Env, todayISO = nowISO()): Promise<{ computed: number }> {
+  const today = dateOnly(todayISO);
+  const res = await env.DB.prepare(
+    `SELECT id FROM positions
+      WHERE return_pct IS NOT NULL AND (risk_metrics_as_of IS NULL OR risk_metrics_as_of < ?)
+      ORDER BY risk_metrics_as_of ASC LIMIT ?`,
+  ).bind(today, MAX_RISK_POSITIONS_PER_RUN).all<{ id: string }>();
+
+  let computed = 0;
+  for (const { id } of res.results ?? []) {
+    try {
+      const vals = (await env.DB.prepare(
+        'SELECT return_pct, excess_pct FROM valuations WHERE position_id = ? ORDER BY as_of ASC',
+      ).bind(id).all<{ return_pct: number | null; excess_pct: number | null }>()).results ?? [];
+      const cumRet = vals.map((v) => v.return_pct).filter((r): r is number => r !== null);
+      const cumExc = vals.map((v) => v.excess_pct).filter((e): e is number => e !== null);
+      const dd = cumRet.length ? maxDrawdown(cumRet) : null;
+      const vol = cumRet.length > 1 ? annualisedVol(periodReturns(cumRet)) : null;
+      const shp = cumExc.length > 1 ? sharpe(periodReturns(cumExc)) : null;
+      await env.DB.prepare(
+        'UPDATE positions SET max_drawdown_pct = ?, volatility_pct = ?, sharpe_proxy = ?, risk_metrics_as_of = ? WHERE id = ?',
+      ).bind(dd, vol, shp, today, id).run();
+      computed++;
+    } catch (err) {
+      await logOps(env, 'error', { at: 'recomputeRiskMetrics', position: id, err: String(err) });
+    }
+  }
+  return { computed };
 }
 
 /** Direction-aware hit: long views want positive alpha; short views want negative. */

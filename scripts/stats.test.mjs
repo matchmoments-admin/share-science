@@ -2,7 +2,7 @@
 // Uses Node's built-in test runner with type-stripping to import the .ts module.
 import test from 'node:test';
 import assert from 'node:assert/strict';
-import { wilson, median, mean, convictionWeight, weightedMean } from '../src/lib/stats.ts';
+import { wilson, median, mean, convictionWeight, weightedMean, maxDrawdown, periodReturns, annualisedVol, sharpe } from '../src/lib/stats.ts';
 
 test('Buffett property: an established record outranks a perfect small sample', () => {
   const streak = wilson(5, 5).lower; // 5/5 lucky streak
@@ -38,4 +38,19 @@ test('weightedMean weights high-conviction calls more', () => {
   // a winning high-conviction call (+10%, w3) vs a losing low call (-10%, w1) → net positive
   assert.equal(weightedMean([0.1, -0.1], [3, 1]), (0.1 * 3 - 0.1 * 1) / 4);
   assert.equal(weightedMean([], []), 0);
+});
+
+test('maxDrawdown finds the worst peak-to-trough fall', () => {
+  // cumulative returns: up to +20%, down to -10% → equity 1.2 → 0.9, dd = .3/1.2 = .25
+  assert.ok(Math.abs(maxDrawdown([0, 0.2, -0.1]) - 0.25) < 1e-9);
+  assert.equal(maxDrawdown([0, 0.1, 0.2]), 0); // monotonic up → no drawdown
+  assert.equal(maxDrawdown([]), 0);
+});
+
+test('periodReturns / vol / sharpe behave sanely', () => {
+  assert.deepEqual(periodReturns([0, 0, 0]), [0, 0]); // flat → zero period returns
+  assert.equal(annualisedVol([0, 0, 0]), 0); // no variation → zero vol
+  assert.equal(sharpe([0, 0]), 0); // zero stdev → 0, not NaN
+  assert.equal(sharpe([0.01, 0.01, 0.01]), 0); // constant → zero stdev → 0
+  assert.ok(sharpe([0.03, 0.01, 0.02]) > 0); // positive mean with variation → positive Sharpe
 });

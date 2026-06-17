@@ -13,7 +13,7 @@ import { extractTips } from './lib/extract.js';
 import { resolveSecurity } from './lib/resolve.js';
 import { seedExchange } from './lib/securities.js';
 import { openPendingPositions } from './lib/trade.js';
-import { valueOpenPositions } from './lib/track.js';
+import { valueOpenPositions, recomputeRiskMetrics } from './lib/track.js';
 import { recomputeRatings } from './lib/ratings.js';
 import { snapshotNav } from './lib/nav.js';
 import { classifyHorizon } from './lib/horizon.js';
@@ -137,10 +137,11 @@ async function handleRunDaily(req: Request, env: Env): Promise<Response> {
   if (!authed(req, env)) return json({ error: 'unauthorized' }, 401);
   const opened = await openPendingPositions(env);
   const valued = await valueOpenPositions(env);
+  const risk = await recomputeRiskMetrics(env);
   const nav = await snapshotNav(env);
   const rated = await recomputeRatings(env);
-  await logOps(env, 'cron', { job: 'manual-daily', ...opened, ...valued, ...rated });
-  return json({ ok: true, ...opened, ...valued, nav, rated });
+  await logOps(env, 'cron', { job: 'manual-daily', ...opened, ...valued, ...risk, ...rated });
+  return json({ ok: true, ...opened, ...valued, risk, nav, rated });
 }
 
 async function handleRunWeekly(req: Request, env: Env): Promise<Response> {
@@ -250,9 +251,10 @@ export default {
     } else if (controller.cron === '0 6 * * *') {
       const opened = await openPendingPositions(env);
       const valued = await valueOpenPositions(env);
+      const risk = await recomputeRiskMetrics(env);
       const nav = await snapshotNav(env);
       const rated = await recomputeRatings(env);
-      await logOps(env, 'cron', { job: 'daily', ...opened, ...valued, nav, ...rated });
+      await logOps(env, 'cron', { job: 'daily', ...opened, ...valued, ...risk, nav, ...rated });
     } else {
       const digest = await generateAndStoreDigest(env);
       await logOps(env, 'cron', { job: 'weekly', ...digest });

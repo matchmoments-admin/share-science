@@ -66,3 +66,47 @@ export function weightedMean(xs: number[], ws: number[]): number {
   }
   return den === 0 ? 0 : num / den;
 }
+
+const TRADING_DAYS = 252; // annualisation factor; each valuation step is treated as ~1 trading day
+
+/**
+ * Max drawdown of a cumulative-return series (fractions, e.g. 0.12 = +12% from entry). Converts to
+ * an equity curve (1+r), tracks the running peak, and returns the worst peak-to-trough fall as a
+ * POSITIVE fraction (0.2 = a 20% drawdown). 0 for an empty/monotonic-up series.
+ */
+export function maxDrawdown(cumulativeReturns: number[]): number {
+  let peak = -Infinity;
+  let maxDd = 0;
+  for (const r of cumulativeReturns) {
+    const equity = 1 + r;
+    if (equity > peak) peak = equity;
+    if (peak > 0) {
+      const dd = (peak - equity) / peak;
+      if (dd > maxDd) maxDd = dd;
+    }
+  }
+  return maxDd;
+}
+
+/** Step-over-step simple returns of the equity curve implied by a cumulative-return series. */
+export function periodReturns(cumulativeReturns: number[]): number[] {
+  const out: number[] = [];
+  for (let i = 1; i < cumulativeReturns.length; i++) {
+    const prev = 1 + cumulativeReturns[i - 1];
+    if (prev === 0) continue;
+    out.push((1 + cumulativeReturns[i]) / prev - 1);
+  }
+  return out;
+}
+
+/** Annualised volatility = stdev of period returns × √252. 0 when there's too little data. */
+export function annualisedVol(periods: number[], periodsPerYear = TRADING_DAYS): number {
+  return stdev(periods) * Math.sqrt(periodsPerYear);
+}
+
+/** Annualised Sharpe-style ratio of a period-return series (risk-free ≈ 0). 0 when stdev is 0. */
+export function sharpe(periods: number[], periodsPerYear = TRADING_DAYS): number {
+  const sd = stdev(periods);
+  if (sd === 0) return 0;
+  return (mean(periods) / sd) * Math.sqrt(periodsPerYear);
+}
