@@ -49,7 +49,7 @@ export function layout(title: string, body: string): Response {
 </style>
 </head>
 <body>
-<nav><a href="/">← Leaderboard</a></nav>
+<nav><a href="/leaderboard">← Leaderboard</a></nav>
 ${body}
 <footer>${escapeHtml(DISCLAIMER)}</footer>
 </body>

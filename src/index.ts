@@ -19,6 +19,7 @@ import { pollRssSources } from './lib/producers/rss.js';
 import { pollBlueskySources } from './lib/producers/bluesky.js';
 import { pollPodcastSources } from './lib/producers/podcast.js';
 import { leaderboard, leaderboardJson, sourcePage, tipPage, securityPage } from './lib/pages.js';
+import { landingPage, handleSubscribe } from './lib/landing.js';
 import { generateAndStoreDigest } from './lib/content.js';
 
 const EXTRACT_BUDGET_CENTS = 5; // headroom before an extraction call (multi-tip ≈ a few cents)
@@ -180,8 +181,12 @@ export default {
     if (url.pathname === '/admin/seed-securities' && req.method === 'POST') return handleSeedSecurities(req, env);
     if (url.pathname === '/admin/poll' && req.method === 'POST') return handlePoll(req, env);
 
+    // Public landing page (newsletter signup) + signup endpoint.
+    if (url.pathname === '/' && (req.method === 'GET' || req.method === 'HEAD')) return landingPage();
+    if (url.pathname === '/api/subscribe' && req.method === 'POST') return handleSubscribe(req, env);
+
     // Public, crawlable read surface (derived returns only — assertNoRawPrices-guarded).
-    if (url.pathname === '/') return leaderboard(env);
+    if (url.pathname === '/leaderboard') return leaderboard(env);
     if (url.pathname === '/api/public/leaderboard') return leaderboardJson(env);
     const m = url.pathname.match(/^\/(sources|tips|securities)\/(.+)$/);
     if (m && req.method === 'GET') {
