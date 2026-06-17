@@ -129,6 +129,10 @@ export function methodologyPage(): Response {
     <p>Delisted, acquired and failed tickers are kept in the record at their last value. Quietly dropping
       losers is exactly what inflates a published track record; we don't.</p>
 
+    <h2>Time to target</h2>
+    <p>When a source states an explicit price target, we record whether and <b>how fast</b> the price
+      first reached it. We publish the days-to-target, never the target price itself.</p>
+
     <h2>Risk, not just return</h2>
     <p>For each call we also report <b>max drawdown</b> (the worst peak-to-trough fall on its return
       curve), <b>annualised volatility</b>, and a <b>Sharpe-style ratio</b> of its excess return.
@@ -211,8 +215,8 @@ export async function sourcePage(env: Env, id: string): Promise<Response> {
 // ── Tip outcome ──────────────────────────────────────────────────────
 export async function tipPage(env: Env, id: string): Promise<Response> {
   const t = await env.DB.prepare(
-    `SELECT t.id, t.direction, t.conviction, t.horizon, t.detected_at, t.evidence_span, t.status,
-            s.id AS source_id, s.name AS source_name, sec.ticker, sec.name AS sec_name
+    `SELECT t.id, t.direction, t.conviction, t.horizon, t.tip_type, t.detected_at, t.evidence_span, t.status,
+            t.target_price_raw, s.id AS source_id, s.name AS source_name, sec.ticker, sec.name AS sec_name
        FROM tips t JOIN sources s ON s.id = t.source_id
        LEFT JOIN securities sec ON sec.id = t.security_id WHERE t.id = ?`,
   ).bind(id).first<any>();
@@ -223,9 +227,11 @@ export async function tipPage(env: Env, id: string): Promise<Response> {
   ).bind(id).all()).results ?? [];
   const valCount = await env.DB.prepare('SELECT count(*) AS n FROM validations WHERE tip_id = ?').bind(id).first<{ n: number }>();
   const risk = await env.DB.prepare(
-    'SELECT max_drawdown_pct, volatility_pct, sharpe_proxy FROM positions WHERE tip_id = ?',
-  ).bind(id).first<{ max_drawdown_pct: number | null; volatility_pct: number | null; sharpe_proxy: number | null }>();
-  assertNoRawPrices(env, { t, returns, risk });
+    'SELECT max_drawdown_pct, volatility_pct, sharpe_proxy, target_hit_at, days_to_target FROM positions WHERE tip_id = ?',
+  ).bind(id).first<{ max_drawdown_pct: number | null; volatility_pct: number | null; sharpe_proxy: number | null; target_hit_at: string | null; days_to_target: number | null }>();
+  const hasTarget = (t.target_price_raw ?? null) !== null;
+  // Never expose the raw target price — only whether/when it was reached.
+  assertNoRawPrices(env, { t: { ...t, target_price_raw: undefined }, returns, risk: { ...risk, target_hit_at: undefined } });
 
   const retTable = returns.length === 0 ? '<p class="muted">No settled horizons yet — outcomes appear at 30/90/365 days.</p>' :
     `<table><thead><tr><th>Horizon</th><th>Return</th><th>Alpha vs benchmark</th><th>Hit?</th><th>As of</th></tr></thead><tbody>
@@ -239,12 +245,19 @@ export async function tipPage(env: Env, id: string): Promise<Response> {
        · Sharpe-proxy ${risk.sharpe_proxy === null ? '–' : risk.sharpe_proxy.toFixed(2)}</p>`
     : '';
 
+  // Time-to-target: report whether/how fast the stated target was reached — never the target price.
+  const targetLine = hasTarget
+    ? `<p class="muted">Stated price target: ${risk?.days_to_target != null
+        ? `reached in ${risk.days_to_target} day${risk.days_to_target === 1 ? '' : 's'}`
+        : 'not yet reached'}.</p>`
+    : '';
+
   return layout(`${t.ticker || 'Tip'} — ${t.source_name}`, `<h1>${escapeHtml(t.ticker || '—')} · ${escapeHtml(t.direction)}</h1>
     <p class="muted">Called by <a href="/sources/${encodeURIComponent(t.source_id)}">${escapeHtml(t.source_name)}</a>
       on ${escapeHtml((t.detected_at || '').slice(0, 10))}${t.horizon ? ' · horizon: ' + escapeHtml(t.horizon) : ''}
       ${valCount && valCount.n > 0 ? ` · corroborated by ${valCount.n} other source(s)` : ''}</p>
     ${t.evidence_span ? `<blockquote class="muted">“${escapeHtml(t.evidence_span)}”</blockquote>` : ''}
-    ${retTable}${riskLine}`);
+    ${retTable}${riskLine}${targetLine}`);
 }
 
 // ── Security page ────────────────────────────────────────────────────

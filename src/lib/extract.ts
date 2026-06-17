@@ -28,12 +28,14 @@ const TIP_ITEM = {
     conviction: { type: ['string', 'null'], enum: ['low', 'medium', 'high', null] },
     horizon: { type: ['string', 'null'], description: 'Stated holding horizon as spoken (e.g. "a few months", "5 years"), else null.' },
     tip_type: { type: ['string', 'null'], enum: ['short', 'swing', 'buy_hold', null], description: 'Bucket the horizon: short (days/intraday), swing (weeks–months), buy_hold (a year or more). null if unclear.' },
+    target_price: { type: ['number', 'null'], description: 'Explicit price target if stated (a number, in the security currency), else null. Never invent one.' },
+    target_currency: { type: ['string', 'null'], description: "Currency of target_price (e.g. 'USD','AUD') if stated, else null." },
     rationale: { type: ['string', 'null'], description: 'One-sentence summary of the stated reasoning.' },
     evidence_span: { type: 'string', description: 'Verbatim quote expressing THIS view.' },
     speaker: { type: ['string', 'null'], description: 'Name of the person who made THIS specific call, if identifiable, else null.' },
     confidence: { type: 'number', description: '0..1 confidence this is a genuine, correctly-extracted call.' },
   },
-  required: ['proposed_ticker', 'exchange_hint', 'company_name', 'direction', 'conviction', 'horizon', 'tip_type', 'rationale', 'evidence_span', 'speaker', 'confidence'],
+  required: ['proposed_ticker', 'exchange_hint', 'company_name', 'direction', 'conviction', 'horizon', 'tip_type', 'target_price', 'target_currency', 'rationale', 'evidence_span', 'speaker', 'confidence'],
 };
 
 const RECORD_TIPS_TOOL: Anthropic.Tool = {
@@ -102,6 +104,8 @@ function coerce(input: unknown): ExtractedTip {
     horizon,
     tip_type,
     horizon_days_target,
+    target_price: typeof o.target_price === 'number' && isFinite(o.target_price) && o.target_price > 0 ? o.target_price : null,
+    target_currency: strOrNull(o.target_currency),
     rationale: strOrNull(o.rationale),
     evidence_span: typeof o.evidence_span === 'string' ? o.evidence_span : '',
     speaker: strOrNull(o.speaker),

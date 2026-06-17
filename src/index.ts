@@ -119,13 +119,14 @@ async function consumeOne(env: Env, m: TipIngestMessage): Promise<void> {
     await env.DB.prepare(
       `INSERT OR IGNORE INTO tips
          (id, security_id, source_id, ingest_item_id, direction, conviction, horizon, tip_type,
-          horizon_days_target, rationale, evidence_span, speaker, confidence, extractor, detected_at,
-          status, created_at)
-       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+          horizon_days_target, target_price_raw, target_currency, rationale, evidence_span, speaker,
+          confidence, extractor, detected_at, status, created_at)
+       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
     ).bind(
       uid(), security?.id ?? null, m.source_id, m.ingest_item_id, tip.direction, tip.conviction, tip.horizon,
-      tip.tip_type, tip.horizon_days_target, tip.rationale, tip.evidence_span, tip.speaker, tip.confidence,
-      model, m.detected_at, security ? 'resolved' : 'review', nowISO(),
+      tip.tip_type, tip.horizon_days_target, tip.target_price, tip.target_currency, tip.rationale,
+      tip.evidence_span, tip.speaker, tip.confidence, model, m.detected_at,
+      security ? 'resolved' : 'review', nowISO(),
     ).run();
   }
 

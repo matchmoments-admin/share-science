@@ -25,11 +25,14 @@ interface OpenPosition {
   entry_at: string;
   entry_price_adj: number;
   direction: string;
+  target_price_raw: number | null;
+  target_hit_at: string | null;
 }
 
 export async function valueOpenPositions(env: Env, todayISO = nowISO()): Promise<{ valued: number; closed: number; open_remaining: number }> {
   const res = await env.DB.prepare(
-    `SELECT p.id, p.tip_id, p.security_id, p.benchmark_id, p.entry_at, p.entry_price_adj, t.direction
+    `SELECT p.id, p.tip_id, p.security_id, p.benchmark_id, p.entry_at, p.entry_price_adj, t.direction,
+            t.target_price_raw, p.target_hit_at
        FROM positions p JOIN tips t ON t.id = p.tip_id
       WHERE p.status = 'open'
       ORDER BY p.last_valued_at ASC
@@ -70,6 +73,15 @@ async function valueOne(env: Env, pos: OpenPosition, todayISO: string, cache: Pr
     await env.DB.prepare(
       `UPDATE positions SET return_pct = ?, bench_return_pct = ?, excess_return_pct = ?, last_valued_at = ? WHERE id = ?`,
     ).bind(ret, benchRet, excess, nowISO(), pos.id).run();
+
+    // Time-to-target: first session the RAW price crosses the stated (raw) target. Idempotent —
+    // only set while still NULL. Reuses the `latest` bar already fetched (no extra price call).
+    if (pos.target_price_raw && !pos.target_hit_at && targetCrossed(pos.direction, latest.raw, pos.target_price_raw)) {
+      const days = daysBetween(pos.entry_at, latest.date);
+      await env.DB.prepare(
+        'UPDATE positions SET target_hit_at = ?, days_to_target = ? WHERE id = ? AND target_hit_at IS NULL',
+      ).bind(latest.date, days, pos.id).run();
+    }
   }
 
   // Horizon snapshots (exact target date, idempotent).
@@ -143,6 +155,19 @@ export async function recomputeRiskMetrics(env: Env, todayISO = nowISO()): Promi
 function hit(direction: string, excess: number): boolean {
   if (direction === 'sell' || direction === 'bearish') return excess < 0;
   return excess > 0; // buy / bullish
+}
+
+/** Direction-aware target cross: a buy reaches its target at/above it; a sell at/below it. */
+function targetCrossed(direction: string, price: number, target: number): boolean {
+  if (direction === 'sell' || direction === 'bearish') return price <= target;
+  return price >= target; // buy / bullish
+}
+
+/** Whole calendar days between two ISO dates (date-only). */
+function daysBetween(fromISO: string, toISO: string): number {
+  const a = Date.parse(`${dateOnly(fromISO)}T00:00:00Z`);
+  const b = Date.parse(`${dateOnly(toISO)}T00:00:00Z`);
+  return Math.round((b - a) / 86_400_000);
 }
 
 async function benchReturn(env: Env, bench: Security, entryAt: string, asOf: string, cache: PriceCache): Promise<number | null> {

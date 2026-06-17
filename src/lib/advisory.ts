@@ -67,6 +67,9 @@ const RAW_PRICE_FIELDS = new Set([
   'last',
   'bid',
   'ask',
+  'target_price_raw',
+  'target_price',
+  'target',
 ]);
 
 function findRawPriceKeys(value: unknown, hits: Set<string>): void {

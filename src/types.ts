@@ -65,6 +65,8 @@ export interface ExtractedTip {
   horizon: string | null;
   tip_type: 'short' | 'swing' | 'buy_hold' | null; // bucketed stated horizon (governs primary score)
   horizon_days_target: number | null; // parsed numeric horizon in days, null if unstated
+  target_price: number | null; // stated price target (raw; internal only), null if unstated
+  target_currency: string | null;
   rationale: string | null;
   evidence_span: string;
   speaker: string | null; // analyst/author who made THIS call (for per-speaker leaderboards later)
