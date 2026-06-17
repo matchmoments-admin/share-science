@@ -54,7 +54,8 @@ export interface OrderResult {
 export async function submitBuy(env: Env, symbol: string, clientOrderId: string): Promise<OrderResult> {
   const cfg = config(env);
   if (!cfg) return { ok: false, reason: 'alpaca_not_configured' };
-  const notional = Math.max(1, Number(env.ALPACA_NOTIONAL_USD) || 5);
+  const MAX_NOTIONAL = 50; // hard ceiling per buy — a typo in ALPACA_NOTIONAL_USD can't blow exposure
+  const notional = Math.max(1, Math.min(MAX_NOTIONAL, Number(env.ALPACA_NOTIONAL_USD) || 5));
 
   const resp = await fetch(`${cfg.base}/v2/orders`, {
     method: 'POST',
@@ -73,10 +74,12 @@ export async function submitBuy(env: Env, symbol: string, clientOrderId: string)
     }),
   });
 
+  if (resp.status === 429) return { ok: false, reason: 'rate_limited' }; // leave as paper, retry never re-buys
   if (resp.status === 422) {
-    // duplicate client_order_id or non-tradable symbol — treat as a no-op, not a failure
     const body = await resp.text();
-    return { ok: false, reason: `unprocessable:${body.slice(0, 80)}` };
+    // duplicate client_order_id ⇒ the order was already placed earlier; idempotent success
+    if (/client_order_id/i.test(body)) return { ok: true, reason: 'duplicate' };
+    return { ok: false, reason: `unprocessable:${body.slice(0, 80)}` }; // not tradable / no funds
   }
   if (!resp.ok) return { ok: false, reason: `alpaca_${resp.status}` };
   const data = (await resp.json()) as { id?: string; status?: string };

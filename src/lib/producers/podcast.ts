@@ -14,7 +14,7 @@ import { parseRss, stripHtml, toISO } from './rss.js';
 
 const MAX_PODCASTS_PER_RUN = 5;
 const MAX_EPISODES_PER_RUN = 3; // bound Deepgram spend per invocation
-const RESERVE_CENTS = 30; // budget headroom required per episode (transcribe ~19c + extract ~10c)
+const RESERVE_CENTS = 50; // headroom per episode (worst-case ~90min transcribe ~39c + extract ~10c)
 const DEEPGRAM_CENTS_PER_MIN = 0.43; // Nova-3 pay-as-you-go ≈ $0.0043/min
 
 interface PodSource {
@@ -48,6 +48,11 @@ export async function pollPodcastSources(env: Env): Promise<{ sources: number; e
         const key = it.guid || it.enclosure || it.link;
         if (!it.enclosure || !key) continue;
         if (!isSafePublicUrl(it.enclosure)) continue;
+        const detected_at = toISO(it.pubDate);
+        if (!detected_at) { // never fall back to now() — that would fake a look-ahead-free entry
+          await logOps(env, 'error', { at: 'pollPodcastSources', source: s.id, err: 'unparseable_pubDate' });
+          continue;
+        }
         if (await alreadyIngested(env, s.id, key)) continue; // dedup BEFORE paying Deepgram
         if (!(await withinBudget(env, RESERVE_CENTS))) {
           await logOps(env, 'publish', { at: 'pollPodcastSources', skipped: 'over_budget', source: s.id });
@@ -62,7 +67,7 @@ export async function pollPodcastSources(env: Env): Promise<{ sources: number; e
         const text = `${it.title}\n\n${stripHtml(it.content)}\n\nTRANSCRIPT:\n${tr.transcript}`;
         const r = await ingest(env, {
           source_id: s.id, source_type: 'podcast', text, url: it.link,
-          detected_at: toISO(it.pubDate) || new Date().toISOString(), external_id: key,
+          detected_at, external_id: key,
         });
         if (r.ok && !r.duplicate) ingested++;
       }
@@ -88,6 +93,7 @@ interface Transcription {
 
 /** Deepgram URL transcription (Deepgram fetches the audio itself — no download on our side). */
 async function transcribe(env: Env, audioUrl: string): Promise<Transcription> {
+  if (!isSafePublicUrl(audioUrl)) throw new Error('unsafe_audio_url'); // defense-in-depth (SSRF)
   const resp = await fetch('https://api.deepgram.com/v1/listen?model=nova-3&smart_format=true&punctuate=true', {
     method: 'POST',
     headers: { authorization: `Token ${env.DEEPGRAM_API_KEY}`, 'content-type': 'application/json' },
