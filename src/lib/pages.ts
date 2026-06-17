@@ -99,11 +99,36 @@ export function methodologyPage(): Response {
     <p>Delisted, acquired and failed tickers are kept in the record at their last value. Quietly dropping
       losers is exactly what inflates a published track record; we don't.</p>
 
+    <h2>The $1,000 journey</h2>
+    <p>The portfolio curve starts at a $1,000 base and is marked each day to the equal-weighted mean
+      return of every tracked tip — open and closed. It is a normalised <b>index</b>, not a dollar
+      price, and closed/failed calls stay in the average so the curve can't flatter itself by dropping
+      losers.</p>
+
     <h2>Currency</h2>
     <p>Returns are currency-neutral ratios, so cross-market comparisons are fair. Any dollar-denominated
       figure states its currency.</p>
 
     <p class="muted">We never publish raw market prices — only derived returns and alpha.</p>`);
+}
+
+// ── Portfolio NAV ($1,000 invested) ──────────────────────────────────
+/** Public JSON: the cumulative "$1,000 invested across every tracked tip" equity curve. */
+export async function navJson(env: Env, scope = 'all'): Promise<Response> {
+  const rows = (await env.DB.prepare(
+    `SELECT as_of, nav_index, return_pct, n_positions FROM portfolio_nav
+      WHERE scope = ? ORDER BY as_of ASC LIMIT 1000`,
+  ).bind(scope).all()).results ?? [];
+  assertNoRawPrices(env, rows); // nav_index/return_pct are derived indices, never prices
+  const latest = rows[rows.length - 1] as any;
+  return json({
+    scope,
+    base: 1000,
+    latest: latest ? { as_of: latest.as_of, nav_index: latest.nav_index } : null,
+    hypothetical: true,
+    disclaimer: HYPOTHETICAL_NOTE,
+    series: rows,
+  });
 }
 
 // ── Source card ──────────────────────────────────────────────────────
