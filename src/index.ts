@@ -182,7 +182,7 @@ export default {
     if (url.pathname === '/admin/poll' && req.method === 'POST') return handlePoll(req, env);
 
     // Public landing page (newsletter signup) + signup endpoint.
-    if (url.pathname === '/' && (req.method === 'GET' || req.method === 'HEAD')) return landingPage();
+    if (url.pathname === '/' && (req.method === 'GET' || req.method === 'HEAD')) return landingPage(env);
     if (url.pathname === '/api/subscribe' && req.method === 'POST') return handleSubscribe(req, env);
 
     // Public, crawlable read surface (derived returns only — assertNoRawPrices-guarded).

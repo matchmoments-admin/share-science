@@ -11,9 +11,16 @@
  */
 import type { Env } from '../types.js';
 import { uid, nowISO, logOps } from './db.js';
+import { rateLimit } from './usage.js';
 
 const EMAIL_RE = /^[^\s@]+@[^\s@]+\.[^\s@]+$/;
 const MAX_EMAIL_LEN = 254; // RFC 5321 practical maximum
+const SUBSCRIBE_MAX_PER_HOUR = 5; // per-IP cap on signups
+
+/** Escape a value for use inside a double-quoted HTML attribute. */
+function escapeAttr(s: string): string {
+  return s.replace(/&/g, '&amp;').replace(/"/g, '&quot;').replace(/</g, '&lt;');
+}
 
 function normaliseEmail(raw: unknown): string | null {
   if (typeof raw !== 'string') return null;
@@ -23,25 +30,58 @@ function normaliseEmail(raw: unknown): string | null {
 }
 
 /**
+ * Verify a Cloudflare Turnstile token. Fail-OPEN when TURNSTILE_SECRET_KEY is unset (so the
+ * landing page keeps working before the secret is provisioned); once set, a bad/absent token
+ * is rejected. One bounded call to a fixed Cloudflare host — no budget needed.
+ */
+async function verifyTurnstile(env: Env, token: unknown, ip: string | null): Promise<boolean> {
+  if (!env.TURNSTILE_SECRET_KEY) return true; // not configured → fail open (logged by caller)
+  if (typeof token !== 'string' || !token) return false;
+  try {
+    const body = new FormData();
+    body.set('secret', env.TURNSTILE_SECRET_KEY);
+    body.set('response', token);
+    if (ip) body.set('remoteip', ip);
+    const res = await fetch('https://challenges.cloudflare.com/turnstile/v0/siteverify', { method: 'POST', body });
+    const out = (await res.json()) as { success?: boolean };
+    return out.success === true;
+  } catch {
+    return false; // verification endpoint unreachable → fail closed (secret IS configured)
+  }
+}
+
+/**
  * POST /api/subscribe — store a landing-page email signup.
  * Accepts JSON ({email, source}) from the inline fetch, or form-encoded for the no-JS
  * fallback. Idempotent (UNIQUE email + INSERT OR IGNORE): re-signing up is a no-op success.
  * No external calls, no paid work — a single bounded DB write.
  */
 export async function handleSubscribe(req: Request, env: Env): Promise<Response> {
+  // Per-IP rate limit first — cheap, and caps abuse before any parsing/verification work.
+  const ip = req.headers.get('cf-connecting-ip');
+  if (ip && !(await rateLimit(env, `subscribe:${ip}`, SUBSCRIBE_MAX_PER_HOUR, 3600))) {
+    await logOps(env, 'subscribe', { rejected: 'rate_limited' });
+    return wantsHtml(req)
+      ? htmlResponse(noticePage('Too many attempts — please try again later.'), 429)
+      : json({ ok: false, error: 'rate_limited' }, 429);
+  }
+
   let email: string | null = null;
   let source = 'hero';
+  let turnstileToken: unknown = null;
   const ctype = req.headers.get('content-type') || '';
   try {
     if (ctype.includes('application/json')) {
-      const body = (await req.json()) as { email?: unknown; source?: unknown };
+      const body = (await req.json()) as { email?: unknown; source?: unknown; turnstileToken?: unknown };
       email = normaliseEmail(body.email);
       if (typeof body.source === 'string') source = body.source;
+      turnstileToken = body.turnstileToken;
     } else {
       const form = await req.formData();
       email = normaliseEmail(form.get('email'));
       const s = form.get('source');
       if (typeof s === 'string') source = s;
+      turnstileToken = form.get('cf-turnstile-response');
     }
   } catch {
     return json({ ok: false, error: 'invalid_request' }, 400);
@@ -53,6 +93,14 @@ export async function handleSubscribe(req: Request, env: Env): Promise<Response>
       ? htmlResponse(noticePage('Please enter a valid email address.'), 400)
       : json({ ok: false, error: 'invalid_email' }, 400);
   }
+
+  if (!(await verifyTurnstile(env, turnstileToken, ip))) {
+    await logOps(env, 'subscribe', { rejected: 'captcha_failed', configured: !!env.TURNSTILE_SECRET_KEY });
+    return wantsHtml(req)
+      ? htmlResponse(noticePage('Could not verify you are human — please try again.'), 400)
+      : json({ ok: false, error: 'captcha_failed' }, 400);
+  }
+  if (!env.TURNSTILE_SECRET_KEY) await logOps(env, 'subscribe', { warn: 'turnstile_unconfigured_fail_open' });
 
   try {
     const res = await env.DB.prepare(
@@ -138,7 +186,15 @@ function leaderRows(): string {
     </div>`).join('');
 }
 
-export function landingPage(): Response {
+export function landingPage(env: Env): Response {
+  const siteKey = env.TURNSTILE_SITE_KEY || '';
+  const turnstileScript = siteKey
+    ? '<script src="https://challenges.cloudflare.com/turnstile/v0/api.js" async defer></script>'
+    : '';
+  // Per-form Turnstile widget; empty when unconfigured so the page still works pre-provisioning.
+  const widget = siteKey
+    ? `<div class="cf-turnstile" data-sitekey="${escapeAttr(siteKey)}" data-theme="auto" style="margin-top:14px;"></div>`
+    : '';
   const html = `<!doctype html>
 <html lang="en">
 <head>
@@ -149,6 +205,7 @@ export function landingPage(): Response {
 <link rel="preconnect" href="https://fonts.googleapis.com">
 <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
 <link href="https://fonts.googleapis.com/css2?family=Anton&family=Hanken+Grotesk:wght@400;500;600;700&family=JetBrains+Mono:wght@500;600&display=swap" rel="stylesheet">
+${turnstileScript}
 <style>
   * { box-sizing: border-box; }
   body { margin: 0; }
@@ -196,6 +253,7 @@ export function landingPage(): Response {
               <input name="email" type="email" required placeholder="you@email.com" style="flex: 1; border: none; outline: none; padding: 13px 16px; font-size: 16px; font-family: 'Hanken Grotesk', sans-serif; background: transparent; color: #1A1916;" />
               <button type="submit" data-cta style="border: none; background: #1A1916; color: #fff; font-family: 'Hanken Grotesk', sans-serif; font-weight: 700; font-size: 15px; padding: 0 26px; border-radius: 999px; cursor: pointer; white-space: nowrap; letter-spacing: 0.02em;">Get free tips</button>
             </div>
+            ${widget}
             <div data-signup-err style="color: #B0322C; font-size: 13px; margin: 10px 0 0; display: none;"></div>
           </form>
           <div data-signup-done style="display: none;">
@@ -335,6 +393,7 @@ export function landingPage(): Response {
                   <input name="email" type="email" required placeholder="your@email.com" style="flex: 1; border: none; outline: none; background: transparent; color: #fff; font-family: 'Hanken Grotesk', sans-serif; font-size: 18px; padding: 10px 0;" />
                   <button type="submit" style="border: none; background: transparent; color: #fff; font-family: 'Hanken Grotesk', sans-serif; font-weight: 700; font-size: 14px; letter-spacing: 0.08em; text-transform: uppercase; cursor: pointer; white-space: nowrap; display: flex; align-items: center; gap: 8px;">Subscribe <span style="font-size: 16px;">&rarr;</span></button>
                 </div>
+                ${widget}
                 <div data-signup-err style="color: #E8A6A2; font-size: 13px; margin-top: 10px; display: none;"></div>
               </form>
               <div data-signup-done style="display: none;">
@@ -370,22 +429,34 @@ export function landingPage(): Response {
     function showErr(msg) { if (errEl) { errEl.textContent = msg; errEl.style.display = 'block'; } }
     function clearErr() { if (errEl) { errEl.style.display = 'none'; } }
     input.addEventListener('input', clearErr);
+    function resetWidget() {
+      var w = form.querySelector('.cf-turnstile');
+      if (w && window.turnstile) { try { window.turnstile.reset(w); } catch (e) {} }
+    }
+    function errorFor(code) {
+      if (code === 'invalid_email') return 'Please enter a valid email address.';
+      if (code === 'captcha_failed') return 'Could not verify you are human — please try again.';
+      if (code === 'rate_limited') return 'Too many attempts — please try again later.';
+      return 'Something went wrong — please try again.';
+    }
     form.addEventListener('submit', function (e) {
       e.preventDefault();
       var email = (input.value || '').trim();
       if (!EMAIL_RE.test(email)) { showErr('Please enter a valid email address.'); return; }
+      var tokenEl = form.querySelector('[name="cf-turnstile-response"]');
+      var token = tokenEl ? tokenEl.value : null;
       clearErr();
       if (btn) btn.disabled = true;
       fetch('/api/subscribe', {
         method: 'POST',
         headers: { 'content-type': 'application/json' },
-        body: JSON.stringify({ email: email, source: source })
+        body: JSON.stringify({ email: email, source: source, turnstileToken: token })
       }).then(function (r) { return r.json().catch(function () { return {}; }).then(function (j) { return { ok: r.ok, j: j }; }); })
         .then(function (res) {
           if (res.ok && res.j && res.j.ok) { form.style.display = 'none'; doneEl.style.display = 'block'; }
-          else { showErr((res.j && res.j.error === 'invalid_email') ? 'Please enter a valid email address.' : 'Something went wrong — please try again.'); if (btn) btn.disabled = false; }
+          else { showErr(errorFor(res.j && res.j.error)); if (btn) btn.disabled = false; resetWidget(); }
         })
-        .catch(function () { showErr('Network error — please try again.'); if (btn) btn.disabled = false; });
+        .catch(function () { showErr('Network error — please try again.'); if (btn) btn.disabled = false; resetWidget(); });
     });
   });
 })();

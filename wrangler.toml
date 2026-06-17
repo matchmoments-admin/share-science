@@ -15,6 +15,9 @@ PUBLIC_PRICES = "off"
 MAX_DAILY_COST_CENTS = "500"
 ALPACA_MODE = "paper"      # off | paper | live  — paper-api.alpaca.markets (simulated, no real money)
 ALPACA_NOTIONAL_USD = "5"  # $ per real buy (hard-capped at $50 in code)
+# Turnstile: set the public site key here to render the /api/subscribe widget, and
+# `wrangler secret put TURNSTILE_SECRET_KEY` for server-side verify. Both unset ⇒ fail-open (no widget).
+# TURNSTILE_SITE_KEY = "0x..."
 
 [[d1_databases]]
 binding = "DB"

@@ -11,6 +11,7 @@ export interface Env {
   EXTRACT_MODEL?: string; // override the extraction model (default claude-opus-4-8)
   ALPACA_MODE?: string; // "off" (default) | "paper" | "live" — gates broker execution
   ALPACA_NOTIONAL_USD?: string; // fixed $ size per real buy (default 5)
+  TURNSTILE_SITE_KEY?: string; // public Turnstile widget key (var); when set, /api/subscribe shows the widget
 
   // secrets (set via `wrangler secret put`; optional until the relevant slice)
   ANTHROPIC_API_KEY?: string;
@@ -22,6 +23,7 @@ export interface Env {
   ALPACA_SECRET_KEY?: string;
   DEEPGRAM_API_KEY?: string;
   BEEHIIV_API_KEY?: string;
+  TURNSTILE_SECRET_KEY?: string; // verifies the Turnstile token on /api/subscribe (fail-open if unset)
   TADDY_API_KEY?: string; // podcast transcripts (Taddy); paired with TADDY_USER_ID
   TADDY_USER_ID?: string;
   INGEST_HMAC_SECRET?: string; // verifies POST /ingest/producer from out-of-Worker producers

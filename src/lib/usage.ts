@@ -34,3 +34,17 @@ export async function recordSpend(env: Env, costCents: number, now = Date.now())
   const next = (await spentTodayCents(env, now)) + costCents;
   await env.KV.put(key, String(next), { expirationTtl: Math.ceil((2 * DAY_MS) / 1000) });
 }
+
+/**
+ * Best-effort fixed-window rate limit on a KV counter. Returns true if the action is allowed
+ * (and increments the window), false if `bucket` has already reached `max` within `windowSec`.
+ * KV is eventually consistent, so this is abuse mitigation — not a hard guarantee.
+ */
+export async function rateLimit(env: Env, bucket: string, max: number, windowSec: number, now = Date.now()): Promise<boolean> {
+  const window = Math.floor(now / 1000 / windowSec);
+  const key = `rl:${bucket}:${window}`;
+  const current = Number((await env.KV.get(key)) || 0) || 0;
+  if (current >= max) return false;
+  await env.KV.put(key, String(current + 1), { expirationTtl: windowSec + 60 });
+  return true;
+}
