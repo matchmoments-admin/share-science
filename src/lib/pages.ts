@@ -4,7 +4,7 @@
  */
 import type { Env } from '../types.js';
 import { assertNoRawPrices } from './advisory.js';
-import { layout, escapeHtml, pctCell, score } from './render.js';
+import { layout, escapeHtml, pctCell, score, asOf, HYPOTHETICAL_NOTE } from './render.js';
 
 const DEFAULT_DIM = 'horizon:90';
 
@@ -19,12 +19,13 @@ function json(body: unknown, status = 200): Response {
 export async function leaderboard(env: Env): Promise<Response> {
   const rows = (await env.DB.prepare(
     `SELECT sr.source_id, s.name AS source_name, sr.tier, sr.n_tips, sr.hit_rate,
-            sr.avg_excess_pct, sr.rating_score, sr.score_lower, sr.rank
+            sr.avg_excess_pct, sr.rating_score, sr.score_lower, sr.rank, sr.updated_at
        FROM source_ratings sr JOIN sources s ON s.id = sr.source_id
       WHERE sr.dimension = ? ORDER BY sr.rank ASC`,
   ).bind(DEFAULT_DIM).all()).results ?? [];
   assertNoRawPrices(env, rows);
 
+  const updatedAt = (rows[0] as any)?.updated_at as string | undefined;
   const body = rows.length === 0
     ? '<p class="muted">No rated sources yet — outcomes accrue as tips reach their 90-day mark.</p>'
     : `<table><thead><tr><th>#</th><th>Source</th><th>Tier</th><th>Tips</th><th>Hit rate</th>
@@ -40,7 +41,9 @@ export async function leaderboard(env: Env): Promise<Response> {
        </tr>`).join('')}</tbody></table>
        <p class="muted">Ranked by the lower bound of a 95% confidence interval on hit rate (alpha vs the market
        benchmark), established sources (≥20 settled tips) above provisional — so a small lucky streak
-       can't top a long track record. Horizon: 90 days.</p>`;
+       can't top a long track record. Horizon: 90 days${updatedAt ? ` · ${asOf(updatedAt)}` : ''}.
+       <a href="/methodology">How this is calculated</a>.</p>
+       <p class="muted">${escapeHtml(HYPOTHETICAL_NOTE)}</p>`;
 
   return layout('Tip-source leaderboard', `<h1>Who's actually right?</h1>
     <p class="muted">A factual record of how public share tips performed vs the market. Outcomes, not advice.</p>${body}`);
@@ -50,12 +53,57 @@ export async function leaderboardJson(env: Env): Promise<Response> {
   const rows = (await env.DB.prepare(
     `SELECT sr.source_id, s.name AS source_name, sr.dimension, sr.tier, sr.n_tips, sr.n_hits,
             sr.hit_rate, sr.avg_excess_pct, sr.median_excess_pct, sr.rating_score, sr.score_lower,
-            sr.score_upper, sr.rank
+            sr.score_upper, sr.rank, sr.updated_at
        FROM source_ratings sr JOIN sources s ON s.id = sr.source_id
       WHERE sr.dimension = ? ORDER BY sr.rank ASC`,
   ).bind(DEFAULT_DIM).all()).results ?? [];
   assertNoRawPrices(env, rows);
-  return json({ dimension: DEFAULT_DIM, sources: rows });
+  return json({
+    dimension: DEFAULT_DIM,
+    as_of: (rows[0] as any)?.updated_at ?? null,
+    hypothetical: true,
+    disclaimer: HYPOTHETICAL_NOTE,
+    sources: rows,
+  });
+}
+
+// ── Methodology ──────────────────────────────────────────────────────
+/** Public, static explanation of how outcomes are measured — credibility as a feature. */
+export function methodologyPage(): Response {
+  return layout('Methodology', `<h1>How we measure outcomes</h1>
+    <p class="muted">We score public share tips the same way for everyone, with the rules fixed in
+      advance. ${escapeHtml(HYPOTHETICAL_NOTE)}</p>
+
+    <h2>Entry — no look-ahead</h2>
+    <p>Every call is timestamped the moment it's detected, and that timestamp is immutable. A tip's
+      simulated entry is the <b>open of the first market bar strictly after</b> detection — never the
+      same bar, never a back-dated price. A call can't be credited for a move that had already happened
+      when it was made.</p>
+
+    <h2>Return — total return, corporate-action adjusted</h2>
+    <p>Returns use <b>adjusted</b> closing prices, so splits, dividends and other corporate actions are
+      reinvested into the figure (total return). The frozen, unadjusted entry is kept as evidence.</p>
+
+    <h2>Benchmark — measured per tip</h2>
+    <p>Each tip is compared against its market benchmark (S&amp;P 500 for US, ASX 200 for AU) over its
+      <b>own</b> entry-to-evaluation window — apples-to-apples, not a single index point-to-point number.
+      The credibility metric is <b>alpha</b> (excess return vs that benchmark), not raw return: a buy
+      "hits" if it beat the market; a sell "hits" if it underperformed it.</p>
+
+    <h2>Leaderboard — confidence-adjusted</h2>
+    <p>Sources are ranked by the <b>lower bound of a 95% confidence interval</b> on their hit rate, and
+      established sources (≥20 settled tips) always rank above provisional ones. A small lucky streak
+      can't top a long track record.</p>
+
+    <h2>Survivorship — losers stay in</h2>
+    <p>Delisted, acquired and failed tickers are kept in the record at their last value. Quietly dropping
+      losers is exactly what inflates a published track record; we don't.</p>
+
+    <h2>Currency</h2>
+    <p>Returns are currency-neutral ratios, so cross-market comparisons are fair. Any dollar-denominated
+      figure states its currency.</p>
+
+    <p class="muted">We never publish raw market prices — only derived returns and alpha.</p>`);
 }
 
 // ── Source card ──────────────────────────────────────────────────────

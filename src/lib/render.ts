@@ -21,10 +21,28 @@ export function score(s: number | null | undefined): string {
   return s === null || s === undefined ? '–' : s.toFixed(0);
 }
 
+/** Render an "as of YYYY-MM-DD" stamp for a figure; empty string when no date. */
+export function asOf(date: string | null | undefined): string {
+  const d = (date || '').slice(0, 10);
+  return d ? `as of ${escapeHtml(d)}` : '';
+}
+
+/**
+ * Outcomes here are PAPER-TRADED (hypothetical) — entries are simulated at the first market bar
+ * after a call was detected; no real capital is at risk. Hypothetical performance has inherent
+ * limitations and is not a guarantee of actual future or past results. Shown wherever scores appear.
+ */
+export const HYPOTHETICAL_NOTE =
+  'Hypothetical, paper-traded outcomes — entries are simulated at the first market bar after a ' +
+  'call was detected; no real capital is at risk. Past performance is no guarantee of future results.';
+
 const DISCLAIMER =
   'General information only — a factual, backward-looking record of outcomes. ' +
   'NOT financial advice and NOT a recommendation to buy or sell anything. ' +
-  'We report what happened after a source made a call; what you do with that is your decision.';
+  'We report what happened after a source made a call; what you do with that is your decision. ' +
+  HYPOTHETICAL_NOTE +
+  ' Australia: this is general information only and does not take into account your objectives, ' +
+  'financial situation or needs; consider its appropriateness and seek licensed advice before acting.';
 
 export function layout(title: string, body: string): Response {
   const html = `<!doctype html>
@@ -49,7 +67,7 @@ export function layout(title: string, body: string): Response {
 </style>
 </head>
 <body>
-<nav><a href="/leaderboard">← Leaderboard</a></nav>
+<nav><a href="/leaderboard">← Leaderboard</a> · <a href="/methodology">Methodology</a></nav>
 ${body}
 <footer>${escapeHtml(DISCLAIMER)}</footer>
 </body>

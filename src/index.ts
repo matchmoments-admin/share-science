@@ -18,7 +18,7 @@ import { recomputeRatings } from './lib/ratings.js';
 import { pollRssSources } from './lib/producers/rss.js';
 import { pollBlueskySources } from './lib/producers/bluesky.js';
 import { pollPodcastSources } from './lib/producers/podcast.js';
-import { leaderboard, leaderboardJson, sourcePage, tipPage, securityPage } from './lib/pages.js';
+import { leaderboard, leaderboardJson, sourcePage, tipPage, securityPage, methodologyPage } from './lib/pages.js';
 import { landingPage, handleSubscribe } from './lib/landing.js';
 import { generateAndStoreDigest } from './lib/content.js';
 
@@ -187,6 +187,7 @@ export default {
 
     // Public, crawlable read surface (derived returns only — assertNoRawPrices-guarded).
     if (url.pathname === '/leaderboard') return leaderboard(env);
+    if (url.pathname === '/methodology') return methodologyPage();
     if (url.pathname === '/api/public/leaderboard') return leaderboardJson(env);
     const m = url.pathname.match(/^\/(sources|tips|securities)\/(.+)$/);
     if (m && req.method === 'GET') {

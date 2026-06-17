@@ -8,6 +8,7 @@ import type { Env } from '../types.js';
 import { nowISO, logOps } from './db.js';
 import { withinBudget, recordSpend } from './usage.js';
 import { assertFactual, checkFactual } from './advisory.js';
+import { HYPOTHETICAL_NOTE } from './render.js';
 
 const DRAFT_BUDGET_CENTS = 10;
 const DEFAULT_MODEL = 'claude-opus-4-8';
@@ -65,7 +66,9 @@ export async function draftDigest(env: Env, pack: FactsPack): Promise<{ text: st
       'share tips perform vs the market. STRICT RULES: report only the facts in the provided JSON. ' +
       'Backward-looking and factual ONLY. Never tell the reader to buy, sell, or hold; never call ' +
       'anything a "pick" or "best"; never predict; never use numbers not present in the JSON. Plain, ' +
-      'concise prose. End with one neutral line: "General information only — outcomes, not advice."',
+      'concise prose. Every figure is a paper-traded (hypothetical) outcome — never imply real ' +
+      'money was invested or that results are guaranteed. End with one neutral line: ' +
+      '"General information only — hypothetical, paper-traded outcomes, not advice."',
     messages: [{ role: 'user', content: `Write this week's issue from these facts:\n\n${JSON.stringify(pack, null, 2)}` }],
   });
   const costCents = (msg.usage.input_tokens / 1e6) * 500 + (msg.usage.output_tokens / 1e6) * 2500;
@@ -94,6 +97,7 @@ export async function generateAndStoreDigest(env: Env, week = isoWeek()): Promis
   const html = `<!doctype html><meta charset="utf-8"><title>share-science ${week}</title>` +
     `<article style="font:16px/1.6 system-ui;max-width:680px;margin:2rem auto">` +
     text.split('\n').map((p) => (p.trim() ? `<p>${p.replace(/&/g, '&amp;').replace(/</g, '&lt;')}</p>` : '')).join('') +
+    `<hr><p style="font-size:.8rem;opacity:.7">${HYPOTHETICAL_NOTE.replace(/&/g, '&amp;').replace(/</g, '&lt;')}</p>` +
     `</article>`;
   await env.RAW_MEDIA.put(key, html, { httpMetadata: { contentType: 'text/html; charset=utf-8' } });
   await logOps(env, 'publish', { week, key, top_sources: pack.top_sources.length, closed: pack.closed_this_week.length });
