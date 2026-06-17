@@ -14,12 +14,19 @@ import { configured as beehiivConfigured, createPostDraft } from './beehiiv.js';
 const DRAFT_BUDGET_CENTS = 10;
 const DEFAULT_MODEL = 'claude-opus-4-8';
 
+interface ResolvedCall { tie_back_id: string; ticker: string; source: string; direction: string; return_pct: number | null; excess_pct: number | null; is_hit: number | null }
+
 export interface FactsPack {
   week: string;
   generated_at: string;
   top_sources: Array<{ tie_back_id: string; name: string; tier: string; n_tips: number; hit_rate: number; score_lower: number }>;
-  closed_this_week: Array<{ tie_back_id: string; ticker: string; source: string; direction: string; return_pct: number | null; excess_pct: number | null; is_hit: number | null }>;
+  closed_this_week: ResolvedCall[];
   opened_this_week: Array<{ tie_back_id: string; ticker: string; source: string; direction: string }>;
+  // Recurring weekly franchises (Slice 9). Any may be null/empty in a quiet week.
+  called_it: ResolvedCall | null;   // strongest resolved call this week (highest alpha)
+  blew_it: ResolvedCall | null;     // weakest resolved call this week (lowest alpha)
+  dollar_journey: { nav_index: number; week_ago_index: number | null; change_pct: number | null; as_of: string } | null;
+  horizon_report: Array<{ horizon_days: number; n_tips: number; hit_rate: number; avg_excess_pct: number }>;
 }
 
 /** ISO-ish week label YYYY-Www based on a date (UTC). */
@@ -45,7 +52,7 @@ export async function assembleFactsPack(env: Env, week = isoWeek()): Promise<Fac
        FROM positions p JOIN tips t ON t.id = p.tip_id
        JOIN sources s ON s.id = t.source_id JOIN securities sec ON sec.id = p.security_id
       WHERE p.status = 'closed' AND p.exit_at >= date('now','-7 day') ORDER BY p.exit_at DESC LIMIT 20`,
-  ).all()).results as FactsPack['closed_this_week'] ?? [];
+  ).all<ResolvedCall>()).results ?? [];
 
   const opened = (await env.DB.prepare(
     `SELECT t.id AS tie_back_id, sec.ticker, s.name AS source, t.direction
@@ -53,7 +60,38 @@ export async function assembleFactsPack(env: Env, week = isoWeek()): Promise<Fac
       WHERE t.security_id IS NOT NULL AND t.detected_at >= date('now','-7 day') ORDER BY t.detected_at DESC LIMIT 20`,
   ).all()).results as FactsPack['opened_this_week'] ?? [];
 
-  return { week, generated_at: nowISO(), top_sources: top, closed_this_week: closed, opened_this_week: opened };
+  // Called It / Blew It — strongest + weakest resolved call this week (from the rows already fetched).
+  const scored = closed.filter((c) => c.excess_pct !== null);
+  const called_it = scored.length ? scored.reduce((a, b) => (b.excess_pct! > a.excess_pct! ? b : a)) : null;
+  const blew_it = scored.length ? scored.reduce((a, b) => (b.excess_pct! < a.excess_pct! ? b : a)) : null;
+
+  // The $1,000 Journey — latest NAV vs ~7 days ago.
+  const navNow = await env.DB.prepare(
+    `SELECT as_of, nav_index FROM portfolio_nav WHERE scope = 'all' ORDER BY as_of DESC LIMIT 1`,
+  ).first<{ as_of: string; nav_index: number }>();
+  const navWeekAgo = await env.DB.prepare(
+    `SELECT nav_index FROM portfolio_nav WHERE scope = 'all' AND as_of <= date('now','-7 day') ORDER BY as_of DESC LIMIT 1`,
+  ).first<{ nav_index: number }>();
+  const dollar_journey = navNow
+    ? {
+        nav_index: navNow.nav_index,
+        week_ago_index: navWeekAgo?.nav_index ?? null,
+        change_pct: navWeekAgo?.nav_index ? navNow.nav_index / navWeekAgo.nav_index - 1 : null,
+        as_of: navNow.as_of,
+      }
+    : null;
+
+  // Horizon Report — settled win rates by horizon.
+  const horizon_report = (await env.DB.prepare(
+    `SELECT horizon_days, COUNT(*) AS n_tips,
+            CAST(SUM(is_hit) AS REAL) / COUNT(*) AS hit_rate, AVG(excess_pct) AS avg_excess_pct
+       FROM tip_returns WHERE is_hit IS NOT NULL GROUP BY horizon_days ORDER BY horizon_days`,
+  ).all()).results as FactsPack['horizon_report'] ?? [];
+
+  return {
+    week, generated_at: nowISO(), top_sources: top, closed_this_week: closed, opened_this_week: opened,
+    called_it, blew_it, dollar_journey, horizon_report,
+  };
 }
 
 export async function draftDigest(env: Env, pack: FactsPack): Promise<{ text: string; costCents: number }> {
@@ -67,9 +105,14 @@ export async function draftDigest(env: Env, pack: FactsPack): Promise<{ text: st
       'share tips perform vs the market. STRICT RULES: report only the facts in the provided JSON. ' +
       'Backward-looking and factual ONLY. Never tell the reader to buy, sell, or hold; never call ' +
       'anything a "pick" or "best"; never predict; never use numbers not present in the JSON. Plain, ' +
-      'concise prose. Every figure is a paper-traded (hypothetical) outcome — never imply real ' +
-      'money was invested or that results are guaranteed. End with one neutral line: ' +
-      '"General information only — hypothetical, paper-traded outcomes, not advice."',
+      'concise prose. Structure the issue into these recurring sections, omitting any whose data is ' +
+      'absent: "The Leaderboard" (top_sources), "Called It / Blew It" (called_it = the strongest ' +
+      'resolved call by alpha, blew_it = the weakest — describe outcomes, do not praise or criticise ' +
+      'the source), "The $1,000 Journey" (dollar_journey, an index starting at $1,000 — describe it ' +
+      'as a hypothetical tracked portfolio, never a real one), and "The Horizon Report" ' +
+      '(horizon_report win rates by holding period). Every figure is a paper-traded (hypothetical) ' +
+      'outcome — never imply real money was invested or that results are guaranteed. End with one ' +
+      'neutral line: "General information only — hypothetical, paper-traded outcomes, not advice."',
     messages: [{ role: 'user', content: `Write this week's issue from these facts:\n\n${JSON.stringify(pack, null, 2)}` }],
   });
   const costCents = (msg.usage.input_tokens / 1e6) * 500 + (msg.usage.output_tokens / 1e6) * 2500;
