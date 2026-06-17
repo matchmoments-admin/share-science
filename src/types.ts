@@ -12,6 +12,7 @@ export interface Env {
   ALPACA_MODE?: string; // "off" (default) | "paper" | "live" — gates broker execution
   ALPACA_NOTIONAL_USD?: string; // fixed $ size per real buy (default 5)
   TURNSTILE_SITE_KEY?: string; // public Turnstile widget key (var); when set, /api/subscribe shows the widget
+  BEEHIIV_PUBLICATION_ID?: string; // pub_… id (var); paired with BEEHIIV_API_KEY for subscriber sync + post drafts
 
   // secrets (set via `wrangler secret put`; optional until the relevant slice)
   ANTHROPIC_API_KEY?: string;

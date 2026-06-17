@@ -18,6 +18,9 @@ ALPACA_NOTIONAL_USD = "5"  # $ per real buy (hard-capped at $50 in code)
 # Turnstile: set the public site key here to render the /api/subscribe widget, and
 # `wrangler secret put TURNSTILE_SECRET_KEY` for server-side verify. Both unset ⇒ fail-open (no widget).
 # TURNSTILE_SITE_KEY = "0x..."
+# beehiiv delivery: set the publication id here + `wrangler secret put BEEHIIV_API_KEY`.
+# Both unset ⇒ subscriber sync / digest publish are logged no-ops.
+# BEEHIIV_PUBLICATION_ID = "pub_..."
 
 [[d1_databases]]
 binding = "DB"

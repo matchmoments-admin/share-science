@@ -12,6 +12,37 @@
 import type { Env } from '../types.js';
 import { uid, nowISO, logOps } from './db.js';
 import { rateLimit } from './usage.js';
+import { configured as beehiivConfigured, createSubscriber } from './beehiiv.js';
+
+const MAX_BEEHIIV_SYNC_PER_RUN = 100; // bound the daily subscriber sync
+
+/**
+ * Push not-yet-synced active subscribers to beehiiv. Bounded (LIMIT) + idempotent
+ * (beehiiv_synced_at guard). No-op when beehiiv isn't configured. Per-item isolation: one bad
+ * email is logged and skipped, never crashes the run.
+ */
+export async function syncSubscribersToBeehiiv(env: Env): Promise<{ synced: number; failed: number; skipped?: string }> {
+  if (!beehiivConfigured(env)) return { synced: 0, failed: 0, skipped: 'not_configured' };
+  const rows = (await env.DB.prepare(
+    `SELECT id, email, source FROM subscribers
+      WHERE status = 'active' AND beehiiv_synced_at IS NULL ORDER BY created_at ASC LIMIT ?`,
+  ).bind(MAX_BEEHIIV_SYNC_PER_RUN).all<{ id: string; email: string; source: string | null }>()).results ?? [];
+
+  let synced = 0;
+  let failed = 0;
+  for (const r of rows) {
+    const res = await createSubscriber(env, r.email, r.source || 'unknown');
+    if (res.ok) {
+      await env.DB.prepare('UPDATE subscribers SET beehiiv_synced_at = ? WHERE id = ?').bind(nowISO(), r.id).run();
+      synced++;
+    } else {
+      failed++;
+      await logOps(env, 'error', { at: 'beehiiv_sync', status: res.status, err: res.error });
+    }
+  }
+  await logOps(env, 'subscribe', { job: 'beehiiv-sync', synced, failed });
+  return { synced, failed };
+}
 
 const EMAIL_RE = /^[^\s@]+@[^\s@]+\.[^\s@]+$/;
 const MAX_EMAIL_LEN = 254; // RFC 5321 practical maximum

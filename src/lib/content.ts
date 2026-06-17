@@ -9,6 +9,7 @@ import { nowISO, logOps } from './db.js';
 import { withinBudget, recordSpend } from './usage.js';
 import { assertFactual, checkFactual } from './advisory.js';
 import { HYPOTHETICAL_NOTE } from './render.js';
+import { configured as beehiivConfigured, createPostDraft } from './beehiiv.js';
 
 const DRAFT_BUDGET_CENTS = 10;
 const DEFAULT_MODEL = 'claude-opus-4-8';
@@ -102,4 +103,38 @@ export async function generateAndStoreDigest(env: Env, week = isoWeek()): Promis
   await env.RAW_MEDIA.put(key, html, { httpMetadata: { contentType: 'text/html; charset=utf-8' } });
   await logOps(env, 'publish', { week, key, top_sources: pack.top_sources.length, closed: pack.closed_this_week.length });
   return { ok: true, week, key };
+}
+
+/**
+ * Push the stored weekly digest to beehiiv as a DRAFT for the founder to review + send (never
+ * auto-sends). Re-checks the factual gate on the stored copy, is idempotent on `week`, and degrades
+ * gracefully: if beehiiv post-creation isn't available (Enterprise beta), it records the failure and
+ * the R2 draft remains for a manual paste.
+ */
+export async function publishDigestToBeehiiv(env: Env, week = isoWeek()): Promise<{ ok: boolean; week: string; post_id?: string; reason?: string }> {
+  const existing = await env.DB.prepare('SELECT beehiiv_post_id, status FROM digest_publications WHERE week = ?')
+    .bind(week).first<{ beehiiv_post_id: string | null; status: string }>();
+  if (existing?.status === 'drafted') return { ok: true, week, post_id: existing.beehiiv_post_id ?? undefined };
+
+  if (!beehiivConfigured(env)) return { ok: false, week, reason: 'not_configured' };
+
+  const obj = await env.RAW_MEDIA.get(`digests/${week}.html`);
+  if (!obj) return { ok: false, week, reason: 'no_draft' };
+  const html = await obj.text();
+
+  const verdict = checkFactual(html);
+  if (!verdict.ok) {
+    await logOps(env, 'compliance', { week, blocked: 'advice_language_on_publish', violations: verdict.violations });
+    return { ok: false, week, reason: `advice_language: ${verdict.violations.join(', ')}` };
+  }
+
+  const res = await createPostDraft(env, `share-science — ${week}`, html);
+  const status = res.ok ? 'drafted' : 'failed';
+  await env.DB.prepare(
+    `INSERT OR REPLACE INTO digest_publications (week, beehiiv_post_id, status, detail, created_at)
+     VALUES (?, ?, ?, ?, ?)`,
+  ).bind(week, res.id ?? null, status, res.ok ? null : `${res.status}: ${res.error ?? ''}`.slice(0, 300), nowISO()).run();
+  await logOps(env, 'publish', { week, beehiiv: status, post_id: res.id, err: res.ok ? undefined : res.error });
+
+  return res.ok ? { ok: true, week, post_id: res.id } : { ok: false, week, reason: `beehiiv_error_${res.status}` };
 }

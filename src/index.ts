@@ -21,8 +21,8 @@ import { pollRssSources } from './lib/producers/rss.js';
 import { pollBlueskySources } from './lib/producers/bluesky.js';
 import { pollPodcastSources } from './lib/producers/podcast.js';
 import { leaderboard, leaderboardJson, navJson, sourcePage, tipPage, securityPage, methodologyPage } from './lib/pages.js';
-import { landingPage, handleSubscribe } from './lib/landing.js';
-import { generateAndStoreDigest } from './lib/content.js';
+import { landingPage, handleSubscribe, syncSubscribersToBeehiiv } from './lib/landing.js';
+import { generateAndStoreDigest, publishDigestToBeehiiv } from './lib/content.js';
 
 const EXTRACT_BUDGET_CENTS = 5; // headroom before an extraction call (multi-tip ≈ a few cents)
 const MAX_TIPS_PER_ITEM = 35; // covers a full multi-analyst episode (e.g. The Call ~13 stocks × 2); still bounded
@@ -159,6 +159,19 @@ async function handleDigest(req: Request, env: Env): Promise<Response> {
   return new Response(obj.body, { headers: { 'content-type': 'text/html; charset=utf-8' } });
 }
 
+/** Admin: push the stored weekly digest to beehiiv as a draft (human reviews + sends). */
+async function handlePublishDigest(req: Request, env: Env): Promise<Response> {
+  if (!authed(req, env)) return json({ error: 'unauthorized' }, 401);
+  const week = new URL(req.url).searchParams.get('week') || undefined;
+  return json(await publishDigestToBeehiiv(env, week));
+}
+
+/** Admin: push not-yet-synced subscribers to beehiiv (same bounded pass as the daily cron). */
+async function handleSyncSubscribers(req: Request, env: Env): Promise<Response> {
+  if (!authed(req, env)) return json({ error: 'unauthorized' }, 401);
+  return json(await syncSubscribersToBeehiiv(env));
+}
+
 /** Admin: bulk-seed the security master from an EODHD exchange (?exchange=AU|US). */
 async function handleSeedSecurities(req: Request, env: Env): Promise<Response> {
   if (!authed(req, env)) return json({ error: 'unauthorized' }, 401);
@@ -208,6 +221,8 @@ export default {
     if (url.pathname === '/admin/run-daily' && req.method === 'POST') return handleRunDaily(req, env);
     if (url.pathname === '/admin/run-weekly' && req.method === 'POST') return handleRunWeekly(req, env);
     if (url.pathname === '/admin/digest' && req.method === 'GET') return handleDigest(req, env);
+    if (url.pathname === '/admin/publish-digest' && req.method === 'POST') return handlePublishDigest(req, env);
+    if (url.pathname === '/admin/sync-subscribers' && req.method === 'POST') return handleSyncSubscribers(req, env);
     if (url.pathname === '/admin/seed-securities' && req.method === 'POST') return handleSeedSecurities(req, env);
     if (url.pathname === '/admin/poll' && req.method === 'POST') return handlePoll(req, env);
     if (url.pathname === '/admin/backfill-tip-type' && req.method === 'POST') return handleBackfillTipType(req, env);
@@ -255,7 +270,8 @@ export default {
       const risk = await recomputeRiskMetrics(env);
       const nav = await snapshotNav(env);
       const rated = await recomputeRatings(env);
-      await logOps(env, 'cron', { job: 'daily', ...opened, ...valued, ...risk, nav, ...rated });
+      const synced = await syncSubscribersToBeehiiv(env);
+      await logOps(env, 'cron', { job: 'daily', ...opened, ...valued, ...risk, nav, ...rated, beehiiv: synced });
     } else {
       const digest = await generateAndStoreDigest(env);
       await logOps(env, 'cron', { job: 'weekly', ...digest });
