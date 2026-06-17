@@ -31,13 +31,18 @@ export async function syncSubscribersToBeehiiv(env: Env): Promise<{ synced: numb
   let synced = 0;
   let failed = 0;
   for (const r of rows) {
-    const res = await createSubscriber(env, r.email, r.source || 'unknown');
-    if (res.ok) {
-      await env.DB.prepare('UPDATE subscribers SET beehiiv_synced_at = ? WHERE id = ?').bind(nowISO(), r.id).run();
-      synced++;
-    } else {
+    try {
+      const res = await createSubscriber(env, r.email, r.source || 'unknown');
+      if (res.ok) {
+        await env.DB.prepare('UPDATE subscribers SET beehiiv_synced_at = ? WHERE id = ?').bind(nowISO(), r.id).run();
+        synced++;
+      } else {
+        failed++;
+        await logOps(env, 'error', { at: 'beehiiv_sync', status: res.status, err: res.error });
+      }
+    } catch (err) {
       failed++;
-      await logOps(env, 'error', { at: 'beehiiv_sync', status: res.status, err: res.error });
+      await logOps(env, 'error', { at: 'beehiiv_sync', subscriber: r.id, err: String(err) });
     }
   }
   await logOps(env, 'subscribe', { job: 'beehiiv-sync', synced, failed });

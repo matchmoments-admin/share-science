@@ -130,8 +130,8 @@ export function methodologyPage(): Response {
       losers is exactly what inflates a published track record; we don't.</p>
 
     <h2>Time to target</h2>
-    <p>When a source states an explicit price target, we record whether and <b>how fast</b> the price
-      first reached it. We publish the days-to-target, never the target price itself.</p>
+    <p>When a source states an explicit target level, we record whether and <b>how fast</b> the price
+      first reached it. We publish the days-to-target, never the target level itself.</p>
 
     <h2>Risk, not just return</h2>
     <p>For each call we also report <b>max drawdown</b> (the worst peak-to-trough fall on its return
@@ -140,10 +140,11 @@ export function methodologyPage(): Response {
       These are derived from the same daily valuations and annualised treating each step as a trading day.</p>
 
     <h2>The $1,000 journey</h2>
-    <p>The portfolio curve starts at a $1,000 base and is marked each day to the equal-weighted mean
-      return of every tracked tip — open and closed. It is a normalised <b>index</b>, not a dollar
-      price, and closed/failed calls stay in the average so the curve can't flatter itself by dropping
-      losers.</p>
+    <p>This is the current mark of <b>$1,000 spread equally across every tracked call</b> — the
+      equal-weighted average of each call's return from its own entry, expressed as an index off a
+      $1,000 base (not a dollar price). It is a cross-sectional average, not a single compounding
+      portfolio, and it moves as new calls enter and existing ones are remarked. Closed and failed
+      calls stay in the average, so it can't flatter itself by dropping losers.</p>
 
     <h2>Currency</h2>
     <p>Returns are currency-neutral ratios, so cross-market comparisons are fair. Any dollar-denominated
@@ -230,8 +231,11 @@ export async function tipPage(env: Env, id: string): Promise<Response> {
     'SELECT max_drawdown_pct, volatility_pct, sharpe_proxy, target_hit_at, days_to_target FROM positions WHERE tip_id = ?',
   ).bind(id).first<{ max_drawdown_pct: number | null; volatility_pct: number | null; sharpe_proxy: number | null; target_hit_at: string | null; days_to_target: number | null }>();
   const hasTarget = (t.target_price_raw ?? null) !== null;
-  // Never expose the raw target price — only whether/when it was reached.
-  assertNoRawPrices(env, { t: { ...t, target_price_raw: undefined }, returns, risk: { ...risk, target_hit_at: undefined } });
+  // Never expose the raw target price — DELETE the key (not just blank the value: assertNoRawPrices
+  // matches on key name, so `target_price_raw: undefined` would still trip the guard) before checking.
+  const tPublic: Record<string, unknown> = { ...t };
+  delete tPublic.target_price_raw;
+  assertNoRawPrices(env, { t: tPublic, returns, risk });
 
   const retTable = returns.length === 0 ? '<p class="muted">No settled horizons yet — outcomes appear at 30/90/365 days.</p>' :
     `<table><thead><tr><th>Horizon</th><th>Return</th><th>Alpha vs benchmark</th><th>Hit?</th><th>As of</th></tr></thead><tbody>

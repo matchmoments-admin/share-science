@@ -108,8 +108,9 @@ export async function draftDigest(env: Env, pack: FactsPack): Promise<{ text: st
       'concise prose. Structure the issue into these recurring sections, omitting any whose data is ' +
       'absent: "The Leaderboard" (top_sources), "Called It / Blew It" (called_it = the strongest ' +
       'resolved call by alpha, blew_it = the weakest — describe outcomes, do not praise or criticise ' +
-      'the source), "The $1,000 Journey" (dollar_journey, an index starting at $1,000 — describe it ' +
-      'as a hypothetical tracked portfolio, never a real one), and "The Horizon Report" ' +
+      'the source), "The $1,000 Journey" (dollar_journey: an index off a $1,000 base = the ' +
+      'equal-weighted AVERAGE return across all tracked calls, not a single compounding portfolio — ' +
+      'describe it as a hypothetical average, never a real or guaranteed portfolio), "The Horizon Report" ' +
       '(horizon_report win rates by holding period). Every figure is a paper-traded (hypothetical) ' +
       'outcome — never imply real money was invested or that results are guaranteed. End with one ' +
       'neutral line: "General information only — hypothetical, paper-traded outcomes, not advice."',
