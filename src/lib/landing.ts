@@ -304,9 +304,8 @@ ${turnstileScript}
             <div style="width: 28px; height: 28px; border-radius: 50%; background: linear-gradient(135deg,#f3f3f0,#b9b9b2); border: 2px solid #E8E7E1;"></div>
             <div style="width: 28px; height: 28px; border-radius: 50%; background: linear-gradient(135deg,#d6d6d0,#9a9a93); border: 2px solid #E8E7E1; margin-left: -10px;"></div>
             <div style="width: 28px; height: 28px; border-radius: 50%; background: linear-gradient(135deg,#cfcfc9,#8c8c85); border: 2px solid #E8E7E1; margin-left: -10px;"></div>
-            <div style="width: 28px; height: 28px; border-radius: 50%; background: #1A1916; border: 2px solid #E8E7E1; margin-left: -10px; display: flex; align-items: center; justify-content: center; font-size: 9px; font-weight: 700; color: #fff;">+48k</div>
           </div>
-          <span style="font-size: 13.5px; color: #6A6960;">Join 48,000+ investors &middot; Free weekly &middot; Unsubscribe anytime</span>
+          <span style="font-size: 13.5px; color: #6A6960;">Free weekly &middot; No spam &middot; Unsubscribe anytime</span>
         </div>
       </div>
     </div>
@@ -328,6 +327,7 @@ ${turnstileScript}
         <div style="font-size: 12.5px; font-weight: 600; letter-spacing: 0.14em; text-transform: uppercase; color: #6A6960; margin-bottom: 18px;">How shareo works</div>
         <h2 style="font-family: 'Anton', sans-serif; font-weight: 400; font-size: clamp(48px, 7vw, 92px); line-height: 0.86; letter-spacing: 0.005em; text-transform: uppercase; margin: 0 0 26px;">Follow<br>the proof.</h2>
         <p style="font-size: 17px; line-height: 1.55; color: #4A4944; max-width: 440px; margin: 0;">Three steps. Get the call, watch the crowd validate it, and follow the sharers with the best track record &mdash; no noise, no guesswork.</p>
+        <p style="font-size: 12.5px; line-height: 1.5; color: #8A897F; max-width: 440px; margin: 14px 0 0;">Sample screens below are illustrative. Live grades, hit rates and the source leaderboard are published — backward-looking and hypothetical (paper-traded) — on the <a href="/leaderboard" style="color:#4A4944;">leaderboard</a>.</p>
       </div>
       <a href="#join" data-cta style="text-decoration: none; color: #fff; background: #1A1916; padding: 15px 26px; border-radius: 999px; font-size: 13px; font-weight: 600; letter-spacing: 0.06em; text-transform: uppercase; display: inline-flex; align-items: center; gap: 10px; white-space: nowrap;">Get free tips <span style="font-size: 15px;">&rarr;</span></a>
     </div>

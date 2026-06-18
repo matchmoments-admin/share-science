@@ -23,6 +23,7 @@ import { pollPodcastSources } from './lib/producers/podcast.js';
 import { leaderboard, leaderboardJson, navJson, sourcePage, tipPage, securityPage, methodologyPage } from './lib/pages.js';
 import { landingPage, handleSubscribe, syncSubscribersToBeehiiv } from './lib/landing.js';
 import { generateAndStoreDigest, publishDigestToBeehiiv } from './lib/content.js';
+import { adminCookie, adminDashboard, adminLoginPage, handleAdminLogin, handleAdminLogout } from './lib/admin.js';
 
 const EXTRACT_BUDGET_CENTS = 5; // headroom before an extraction call (multi-tip ≈ a few cents)
 const MAX_TIPS_PER_ITEM = 35; // covers a full multi-analyst episode (e.g. The Call ~13 stocks × 2); still bounded
@@ -33,8 +34,12 @@ function json(body: unknown, status = 200): Response {
 }
 
 function authed(req: Request, env: Env): boolean {
+  if (!env.ADMIN_TOKEN) return false;
   const tok = req.headers.get('x-admin-token');
-  return !!env.ADMIN_TOKEN && !!tok && timingSafeEqual(tok, env.ADMIN_TOKEN);
+  if (tok && timingSafeEqual(tok, env.ADMIN_TOKEN)) return true;
+  // Browser session: the admin console sets an HttpOnly cookie holding the same token.
+  const cookie = adminCookie(req);
+  return !!cookie && timingSafeEqual(cookie, env.ADMIN_TOKEN);
 }
 
 async function handleHealthz(env: Env): Promise<Response> {
@@ -231,6 +236,12 @@ export default {
   async fetch(req: Request, env: Env): Promise<Response> {
     const url = new URL(req.url);
     if (url.pathname === '/healthz') return handleHealthz(env);
+    // Admin console (browser): token login → cookie session → dashboard.
+    if (url.pathname === '/admin/login' && req.method === 'POST') return handleAdminLogin(req, env);
+    if (url.pathname === '/admin/logout' && req.method === 'POST') return handleAdminLogout();
+    if (url.pathname === '/admin' && (req.method === 'GET' || req.method === 'HEAD')) {
+      return authed(req, env) ? adminDashboard(env) : adminLoginPage();
+    }
     if (url.pathname === '/ingest/human' && req.method === 'POST') return handleIngestHuman(req, env);
     if (url.pathname === '/ingest/producer' && req.method === 'POST') return handleIngestProducer(req, env);
     if (url.pathname === '/admin/run-daily' && req.method === 'POST') return handleRunDaily(req, env);

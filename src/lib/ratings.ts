@@ -102,10 +102,13 @@ function buildWeightedRow(source_id: string, dimension: string, rs: SettledRow[]
 export async function recomputeRatings(env: Env): Promise<{ rows: number; dimensions: number }> {
   const RATING_ROW_CAP = 100_000;
   const res = await env.DB.prepare(
+    // Deterministic order so that if the cap ever truncates, it cuts the SAME rows each run
+    // (reproducible ranking) rather than an arbitrary subset. Full pagination is the eventual fix.
     `SELECT t.source_id, tr.horizon_days, tr.excess_pct, tr.is_hit, tr.tip_id,
             t.tip_type, t.horizon_days_target, t.conviction
        FROM tip_returns tr JOIN tips t ON t.id = tr.tip_id
       WHERE tr.is_hit IS NOT NULL AND tr.excess_pct IS NOT NULL
+      ORDER BY tr.tip_id, tr.horizon_days
       LIMIT ?`,
   ).bind(RATING_ROW_CAP).all<SettledRow>();
   const settled = res.results ?? [];
