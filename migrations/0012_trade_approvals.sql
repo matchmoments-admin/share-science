@@ -19,6 +19,9 @@ CREATE TABLE IF NOT EXISTS trade_intents (
 );
 CREATE UNIQUE INDEX IF NOT EXISTS uq_trade_intent_tip ON trade_intents(tip_id);
 CREATE INDEX IF NOT EXISTS idx_trade_intent_status ON trade_intents(status);
+-- Supports the per-run live-exposure tally (status + mode + executed_at) at scale. Retention/prune
+-- of old executed/rejected rows lands with the Ops slice; growth is one row per resolved-eligible tip.
+CREATE INDEX IF NOT EXISTS idx_trade_intent_status_mode ON trade_intents(status, mode);
 
 ALTER TABLE positions ADD COLUMN real_buy_status TEXT; -- placed | failed | NULL (paper-only)
 ALTER TABLE tips ADD COLUMN resolve_reason TEXT;       -- why resolve.ts matched/abstained (audit + review queue)

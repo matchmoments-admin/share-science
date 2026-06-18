@@ -468,6 +468,8 @@ export async function adminTrading(env: Env): Promise<Response> {
   const ordersToday = (await env.DB.prepare(
     `SELECT COUNT(*) n FROM trade_intents WHERE status='executed' AND substr(executed_at,1,10)=?`,
   ).bind(dateOnly(nowISO())).first<{ n: number }>())?.n ?? 0;
+  // Approved-but-not-yet-executed (cap-deferred or awaiting the next sweep) — must stay visible.
+  const awaitingExec = (await env.DB.prepare(`SELECT COUNT(*) n FROM trade_intents WHERE status='approved'`).first<{ n: number }>())?.n ?? 0;
   const maxDaily = Math.max(1, Number(env.MAX_DAILY_TRADES) || 5);
   const maxOpenCents = Math.max(100, Number(env.MAX_OPEN_REAL_NOTIONAL_CENTS) || 20000);
   const real = (await env.DB.prepare(
@@ -497,8 +499,9 @@ export async function adminTrading(env: Env): Promise<Response> {
       <h2>Exposure</h2>
       <div class="grid stats">
         ${card('Pending approval', String(live.length), live.length ? '<a href="/admin/approvals">review queue →</a>' : 'none')}
+        ${card('Approved · awaiting exec', String(awaitingExec), awaitingExec ? 'sweeping (or cap-deferred)' : 'none')}
         ${card('Real positions', String(realCount), 'open + closed')}
-        ${card('Open real exposure', `$${(openNotional / 100).toFixed(0)}`, `cap $${(maxOpenCents / 100).toFixed(0)}`)}
+        ${card('Open real exposure', `$${(openNotional / 100).toFixed(0)}`, `live cap $${(maxOpenCents / 100).toFixed(0)}`)}
         ${card('Orders today', `${ordersToday}<small>/${maxDaily}</small>`, `per-order cap $${MAX_NOTIONAL_USD}`)}
       </div>
 
