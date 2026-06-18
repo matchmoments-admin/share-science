@@ -71,7 +71,7 @@ async function fetchFeed(env: Env, s: RssSource): Promise<RssItem[]> {
 
   const metaKey = `feedmeta:${s.id}`;
   const meta = (await env.KV.get(metaKey, 'json')) as { etag?: string; lastmod?: string } | null;
-  const headers: Record<string, string> = { 'user-agent': 'share-science/0.1 (+https://share-science.matchmoments.workers.dev)' };
+  const headers: Record<string, string> = { 'user-agent': 'shareo/0.1 (+https://shareo.co)' };
   if (meta?.etag) headers['if-none-match'] = meta.etag;
   if (meta?.lastmod) headers['if-modified-since'] = meta.lastmod;
 

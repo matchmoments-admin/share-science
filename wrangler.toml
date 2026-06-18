@@ -8,6 +8,15 @@ main = "src/index.ts"
 compatibility_date = "2025-01-09"
 compatibility_flags = ["nodejs_compat"]
 
+# Custom domain. The zone shareo.co must be on this Cloudflare account; wrangler creates the
+# custom-domain DNS automatically on deploy. workers_dev kept on so the old URL still works during
+# the cutover — set to false once shareo.co is verified to fully retire it.
+workers_dev = true
+routes = [
+  { pattern = "shareo.co", custom_domain = true },
+  { pattern = "www.shareo.co", custom_domain = true },
+]
+
 # Default vars. PUBLIC_PRICES gates raw-price display: keep "off" to stay on the EODHD
 # personal tier (publish derived returns/alpha only — see LEGAL.md + the cost-cliff note).
 [vars]

@@ -10,7 +10,7 @@ It ingests public share/stock **tips**, resolves the security, **paper-trades th
 publishes a **confidence-adjusted source leaderboard** + weekly newsletter. **General information
 only — reports outcomes, never recommends. Not financial advice.**
 
-Live: `https://share-science.matchmoments.workers.dev` (CF account matchmoments, region OC/Sydney).
+Live: `https://shareo.co` (+ `www.`; custom domains on CF account matchmoments, region OC/Sydney). The `share-science.matchmoments.workers.dev` URL stays on as a fallback (`workers_dev = true`).
 
 ## Commands
 - `npm run typecheck` — tsc. `npm test` — stats unit goldens (node test runner).
