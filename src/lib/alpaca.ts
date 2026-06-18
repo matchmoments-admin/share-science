@@ -13,9 +13,35 @@ import type { Env, Security } from '../types.js';
 
 export type AlpacaMode = 'off' | 'paper' | 'live';
 
-export function alpacaMode(env: Env): AlpacaMode {
-  const m = (env.ALPACA_MODE || 'off').toLowerCase();
-  return m === 'paper' || m === 'live' ? m : 'off';
+function normMode(m: string | null | undefined): AlpacaMode | null {
+  const v = (m || '').toLowerCase();
+  return v === 'off' || v === 'paper' || v === 'live' ? v : null;
+}
+
+/**
+ * Effective broker mode. A KV override (`alpaca:mode`, set from the admin console) takes precedence
+ * over env.ALPACA_MODE so the operator can change mode without a redeploy. On any KV read error we
+ * fall back to the deployed env baseline (the safe, intended default) — never silently escalate.
+ */
+export async function alpacaMode(env: Env): Promise<AlpacaMode> {
+  let override: AlpacaMode | null = null;
+  try { override = normMode(await env.KV.get('alpaca:mode')); } catch { override = null; }
+  return override ?? normMode(env.ALPACA_MODE) ?? 'off';
+}
+
+/**
+ * Kill-switch. Returns true (HALT real trading) when KV `trading:enabled` is explicitly '0', OR
+ * when KV cannot be read — fail CLOSED: if we can't confirm trading is enabled, we don't trade.
+ */
+export async function tradingPaused(env: Env): Promise<boolean> {
+  try { return (await env.KV.get('trading:enabled')) === '0'; }
+  catch { return true; }
+}
+
+/** Per-order notional, clamped to [1, $50]. The hard $50 ceiling can't be raised by config. */
+export const MAX_NOTIONAL_USD = 50;
+export function notionalUsd(env: Env): number {
+  return Math.max(1, Math.min(MAX_NOTIONAL_USD, Number(env.ALPACA_NOTIONAL_USD) || 5));
 }
 
 interface AlpacaConfig {
@@ -24,8 +50,8 @@ interface AlpacaConfig {
   secret: string;
 }
 
-function config(env: Env): AlpacaConfig | null {
-  const mode = alpacaMode(env);
+async function config(env: Env): Promise<AlpacaConfig | null> {
+  const mode = await alpacaMode(env);
   if (mode === 'off') return null;
   if (mode === 'live') {
     if (!env.ALPACA_KEY_ID || !env.ALPACA_SECRET_KEY) return null;
@@ -35,9 +61,14 @@ function config(env: Env): AlpacaConfig | null {
   return { base: 'https://paper-api.alpaca.markets', keyId: env.ALPACA_PAPER_KEY_ID, secret: env.ALPACA_PAPER_SECRET_KEY };
 }
 
-/** Only US, long, real-currency securities are eligible for a real buy. */
-export function eligibleForRealBuy(env: Env, sec: Security, direction: string): boolean {
-  if (alpacaMode(env) === 'off') return false;
+/**
+ * Eligible for a real buy: trading not paused (fail-closed), mode != off, US security, long view.
+ * NOTE: only governs whether a trade_intent is PROPOSED. Real execution additionally requires an
+ * operator-'approved' intent (live) — see executeApprovedTrades in trade.ts.
+ */
+export async function eligibleForRealBuy(env: Env, sec: Security, direction: string): Promise<boolean> {
+  if (await tradingPaused(env)) return false;
+  if ((await alpacaMode(env)) === 'off') return false;
   const usExchanges = ['US', 'XNAS', 'XNYS', 'ARCX', 'BATS'];
   if (!usExchanges.includes(sec.exchange)) return false;
   return direction === 'buy' || direction === 'bullish';
@@ -52,10 +83,9 @@ export interface OrderResult {
 
 /** Submit a notional market BUY (fractional). Idempotency via client_order_id = the tip id. */
 export async function submitBuy(env: Env, symbol: string, clientOrderId: string): Promise<OrderResult> {
-  const cfg = config(env);
+  const cfg = await config(env);
   if (!cfg) return { ok: false, reason: 'alpaca_not_configured' };
-  const MAX_NOTIONAL = 50; // hard ceiling per buy — a typo in ALPACA_NOTIONAL_USD can't blow exposure
-  const notional = Math.max(1, Math.min(MAX_NOTIONAL, Number(env.ALPACA_NOTIONAL_USD) || 5));
+  const notional = notionalUsd(env);
 
   const resp = await fetch(`${cfg.base}/v2/orders`, {
     method: 'POST',

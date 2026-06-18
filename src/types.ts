@@ -10,7 +10,9 @@ export interface Env {
   MAX_DAILY_COST_CENTS: string; // daily LLM/transcription spend ceiling
   EXTRACT_MODEL?: string; // override the extraction model (default claude-opus-4-8)
   ALPACA_MODE?: string; // "off" (default) | "paper" | "live" — gates broker execution
-  ALPACA_NOTIONAL_USD?: string; // fixed $ size per real buy (default 5)
+  ALPACA_NOTIONAL_USD?: string; // fixed $ size per real buy (default 5, hard cap $50)
+  MAX_DAILY_TRADES?: string; // aggregate cap: real orders executed per day (code default 5)
+  MAX_OPEN_REAL_NOTIONAL_CENTS?: string; // aggregate cap: total open real exposure in cents (code default 20000 = $200)
   TURNSTILE_SITE_KEY?: string; // public Turnstile widget key (var); when set, /api/subscribe shows the widget
   BEEHIIV_PUBLICATION_ID?: string; // pub_… id (var); paired with BEEHIIV_API_KEY for subscriber sync + post drafts
 

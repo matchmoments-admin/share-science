@@ -12,7 +12,7 @@ import { ingest, verifyHmac, type IngestInput } from './lib/ingest.js';
 import { extractTips } from './lib/extract.js';
 import { resolveSecurity } from './lib/resolve.js';
 import { seedExchange } from './lib/securities.js';
-import { openPendingPositions } from './lib/trade.js';
+import { openPendingPositions, executeApprovedTrades } from './lib/trade.js';
 import { valueOpenPositions, recomputeRiskMetrics } from './lib/track.js';
 import { recomputeRatings } from './lib/ratings.js';
 import { snapshotNav } from './lib/nav.js';
@@ -23,7 +23,7 @@ import { pollPodcastSources } from './lib/producers/podcast.js';
 import { leaderboard, leaderboardJson, navJson, sourcePage, tipPage, securityPage, methodologyPage } from './lib/pages.js';
 import { landingPage, handleSubscribe, syncSubscribersToBeehiiv } from './lib/landing.js';
 import { generateAndStoreDigest, publishDigestToBeehiiv } from './lib/content.js';
-import { adminCookie, adminDashboard, adminLoginPage, handleAdminLogin, handleAdminLogout } from './lib/admin.js';
+import { adminCookie, adminDashboard, adminApprovals, adminTrading, adminLoginPage, handleAdminLogin, handleAdminLogout } from './lib/admin.js';
 
 const EXTRACT_BUDGET_CENTS = 5; // headroom before an extraction call (multi-tip ≈ a few cents)
 const MAX_TIPS_PER_ITEM = 35; // covers a full multi-analyst episode (e.g. The Call ~13 stocks × 2); still bounded
@@ -137,13 +137,13 @@ async function consumeOne(env: Env, m: TipIngestMessage): Promise<void> {
         `INSERT OR IGNORE INTO tips
            (id, security_id, source_id, ingest_item_id, direction, conviction, horizon, tip_type,
             horizon_days_target, target_price_raw, target_currency, rationale, evidence_span, speaker,
-            confidence, extractor, detected_at, status, created_at)
-         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+            confidence, extractor, detected_at, status, resolve_reason, created_at)
+         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
       ).bind(
         uid(), security?.id ?? null, m.source_id, m.ingest_item_id, tip.direction, tip.conviction, tip.horizon,
         tip.tip_type, tip.horizon_days_target, tip.target_price, tip.target_currency, tip.rationale,
         tip.evidence_span, tip.speaker, tip.confidence, model, m.detected_at,
-        security ? 'resolved' : 'review', nowISO(),
+        security ? 'resolved' : 'review', reason ?? null, nowISO(),
       ).run();
     } catch (err) {
       // One bad tip is logged and skipped — never throw the consumer into a retry (which would re-pay).
@@ -157,12 +157,13 @@ async function consumeOne(env: Env, m: TipIngestMessage): Promise<void> {
 async function handleRunDaily(req: Request, env: Env): Promise<Response> {
   if (!authed(req, env)) return json({ error: 'unauthorized' }, 401);
   const opened = await openPendingPositions(env);
+  const trades = await executeApprovedTrades(env);
   const valued = await valueOpenPositions(env);
   const risk = await recomputeRiskMetrics(env);
   const nav = await snapshotNav(env);
   const rated = await recomputeRatings(env);
   await logOps(env, 'cron', { job: 'manual-daily', ...opened, ...valued, ...risk, ...rated });
-  return json({ ok: true, ...opened, ...valued, risk, nav, rated });
+  return json({ ok: true, ...opened, trades, ...valued, risk, nav, rated });
 }
 
 async function handleRunWeekly(req: Request, env: Env): Promise<Response> {
@@ -232,6 +233,56 @@ async function handlePoll(req: Request, env: Env): Promise<Response> {
   return json({ ok: true, rss, bluesky, podcast });
 }
 
+/** Audit trail: every admin mutation logs an ops_events kind='admin' row (one shared token = one actor). */
+async function logAdmin(env: Env, endpoint: string, detail: Record<string, unknown> = {}): Promise<void> {
+  await logOps(env, 'admin', { endpoint, ...detail, at: nowISO() });
+}
+
+/** Approve a proposed LIVE trade intent, then run the (only) executor for it. */
+async function handleApproveTrade(req: Request, env: Env): Promise<Response> {
+  if (!authed(req, env)) return json({ error: 'unauthorized' }, 401);
+  const tip = new URL(req.url).searchParams.get('tip');
+  if (!tip) return json({ error: 'missing ?tip=' }, 400);
+  // CAS: only a 'proposed' intent can be approved (idempotent — a re-click finds nothing to move).
+  const r = await env.DB.prepare(`UPDATE trade_intents SET status='approved', approved_at=? WHERE tip_id=? AND status='proposed'`)
+    .bind(nowISO(), tip).run();
+  await logAdmin(env, '/admin/approve-trade', { tip, approved: !!r.meta.changes });
+  if (!r.meta.changes) return json({ ok: false, error: 'not_in_proposed_state', tip }, 409);
+  const trades = await executeApprovedTrades(env);
+  return json({ ok: true, tip, trades });
+}
+
+/** Reject a proposed trade intent — no broker call ever; the paper position remains the scoring record. */
+async function handleRejectTrade(req: Request, env: Env): Promise<Response> {
+  if (!authed(req, env)) return json({ error: 'unauthorized' }, 401);
+  const tip = new URL(req.url).searchParams.get('tip');
+  if (!tip) return json({ error: 'missing ?tip=' }, 400);
+  const r = await env.DB.prepare(`UPDATE trade_intents SET status='rejected' WHERE tip_id=? AND status IN ('proposed','failed')`).bind(tip).run();
+  await logAdmin(env, '/admin/reject-trade', { tip, rejected: !!r.meta.changes });
+  return json({ ok: !!r.meta.changes, tip });
+}
+
+/** Kill-switch: flip KV trading:enabled. eligibleForRealBuy + executeApprovedTrades read it (fail-closed). */
+async function handleTradingToggle(req: Request, env: Env, pause: boolean): Promise<Response> {
+  if (!authed(req, env)) return json({ error: 'unauthorized' }, 401);
+  await env.KV.put('trading:enabled', pause ? '0' : '1');
+  await logAdmin(env, pause ? '/admin/trading-pause' : '/admin/trading-resume');
+  return json({ ok: true, trading_enabled: !pause });
+}
+
+/** Set the effective broker mode via KV override (off|paper|live). live requires live keys present. */
+async function handleSetAlpacaMode(req: Request, env: Env): Promise<Response> {
+  if (!authed(req, env)) return json({ error: 'unauthorized' }, 401);
+  const mode = (new URL(req.url).searchParams.get('mode') || '').toLowerCase();
+  if (!['off', 'paper', 'live'].includes(mode)) return json({ error: 'mode must be off|paper|live' }, 400);
+  if (mode === 'live' && (!env.ALPACA_KEY_ID || !env.ALPACA_SECRET_KEY)) {
+    return json({ ok: false, error: 'live keys (ALPACA_KEY_ID/SECRET) not configured' }, 400);
+  }
+  await env.KV.put('alpaca:mode', mode);
+  await logAdmin(env, '/admin/set-alpaca-mode', { mode });
+  return json({ ok: true, alpaca_mode: mode });
+}
+
 export default {
   async fetch(req: Request, env: Env): Promise<Response> {
     const url = new URL(req.url);
@@ -242,6 +293,15 @@ export default {
     if (url.pathname === '/admin' && (req.method === 'GET' || req.method === 'HEAD')) {
       return authed(req, env) ? adminDashboard(env) : adminLoginPage();
     }
+    // Admin drill-down views (token-gated).
+    if (url.pathname === '/admin/approvals' && req.method === 'GET') return authed(req, env) ? adminApprovals(env) : adminLoginPage();
+    if (url.pathname === '/admin/trading' && req.method === 'GET') return authed(req, env) ? adminTrading(env) : adminLoginPage();
+    // Trade approval + brokerage controls (mutations).
+    if (url.pathname === '/admin/approve-trade' && req.method === 'POST') return handleApproveTrade(req, env);
+    if (url.pathname === '/admin/reject-trade' && req.method === 'POST') return handleRejectTrade(req, env);
+    if (url.pathname === '/admin/trading-pause' && req.method === 'POST') return handleTradingToggle(req, env, true);
+    if (url.pathname === '/admin/trading-resume' && req.method === 'POST') return handleTradingToggle(req, env, false);
+    if (url.pathname === '/admin/set-alpaca-mode' && req.method === 'POST') return handleSetAlpacaMode(req, env);
     if (url.pathname === '/ingest/human' && req.method === 'POST') return handleIngestHuman(req, env);
     if (url.pathname === '/ingest/producer' && req.method === 'POST') return handleIngestProducer(req, env);
     if (url.pathname === '/admin/run-daily' && req.method === 'POST') return handleRunDaily(req, env);
@@ -289,15 +349,18 @@ export default {
       const rss = await pollRssSources(env);
       const bsky = await pollBlueskySources(env);
       const pod = await pollPodcastSources(env);
-      await logOps(env, 'cron', { job: 'hourly', rss, bsky, pod });
+      // Hourly safety sweep: execute any operator-approved trade intents (bounded, fail-closed).
+      const trades = await executeApprovedTrades(env);
+      await logOps(env, 'cron', { job: 'hourly', rss, bsky, pod, trades });
     } else if (controller.cron === '0 6 * * *') {
       const opened = await openPendingPositions(env);
+      const trades = await executeApprovedTrades(env);
       const valued = await valueOpenPositions(env);
       const risk = await recomputeRiskMetrics(env);
       const nav = await snapshotNav(env);
       const rated = await recomputeRatings(env);
       const synced = await syncSubscribersToBeehiiv(env);
-      await logOps(env, 'cron', { job: 'daily', ...opened, ...valued, ...risk, nav, ...rated, beehiiv: synced });
+      await logOps(env, 'cron', { job: 'daily', ...opened, trades, ...valued, ...risk, nav, ...rated, beehiiv: synced });
     } else {
       const digest = await generateAndStoreDigest(env);
       await logOps(env, 'cron', { job: 'weekly', ...digest });

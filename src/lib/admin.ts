@@ -10,8 +10,9 @@
 import type { Env } from '../types.js';
 import { escapeHtml, pct } from './render.js';
 import { spentTodayCents } from './usage.js';
-import { timingSafeEqual } from './db.js';
+import { timingSafeEqual, nowISO, dateOnly } from './db.js';
 import { BRAND_HEAD } from './theme.js';
+import { alpacaMode, tradingPaused, MAX_NOTIONAL_USD } from './alpaca.js';
 
 const COOKIE = 'ss_admin';
 const COOKIE_TTL_S = 8 * 3600;
@@ -32,9 +33,79 @@ const ICON: Record<string, string> = {
   mail: '<rect x="2" y="4" width="20" height="16" rx="2"/><path d="m22 7-10 6L2 7"/>',
   gauge: '<path d="M12 14a2 2 0 1 0 .01-3.99M12 14l4-4"/><path d="M5 19a9 9 0 1 1 14 0"/>',
   settings: '<circle cx="12" cy="12" r="3"/><path d="M19.4 15a1.65 1.65 0 0 0 .33 1.82l.06.06a2 2 0 1 1-2.83 2.83l-.06-.06a1.65 1.65 0 0 0-1.82-.33 1.65 1.65 0 0 0-1 1.51V21a2 2 0 1 1-4 0v-.09A1.65 1.65 0 0 0 9 19.4a1.65 1.65 0 0 0-1.82.33l-.06.06a2 2 0 1 1-2.83-2.83l.06-.06a1.65 1.65 0 0 0 .33-1.82 1.65 1.65 0 0 0-1.51-1H3a2 2 0 1 1 0-4h.09A1.65 1.65 0 0 0 4.6 9a1.65 1.65 0 0 0-.33-1.82l-.06-.06a2 2 0 1 1 2.83-2.83l.06.06a1.65 1.65 0 0 0 1.82.33H9a1.65 1.65 0 0 0 1-1.51V3a2 2 0 1 1 4 0v.09a1.65 1.65 0 0 0 1 1.51 1.65 1.65 0 0 0 1.82-.33l.06-.06a2 2 0 1 1 2.83 2.83l-.06.06a1.65 1.65 0 0 0-.33 1.82V9a1.65 1.65 0 0 0 1.51 1H21a2 2 0 1 1 0 4h-.09a1.65 1.65 0 0 0-1.51 1z"/>',
+  inbox: '<path d="M22 12h-6l-2 3h-4l-2-3H2"/><path d="M5.45 5.11 2 12v6a2 2 0 0 0 2 2h16a2 2 0 0 0 2-2v-6l-3.45-6.89A2 2 0 0 0 16.76 4H7.24a2 2 0 0 0-1.79 1.11z"/>',
+  coins: '<circle cx="8" cy="8" r="6"/><path d="M18.09 10.37A6 6 0 1 1 10.34 18M7 6h1v4M16.71 13.88l.7.71-2.82 2.82"/>',
 };
 const icon = (name: string, size = 18) =>
   `<svg width="${size}" height="${size}" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round">${ICON[name] || ''}</svg>`;
+
+/** Shared rail nav across views; `active` highlights the current one. */
+function railNav(active: string): string {
+  const it = (href: string, name: string, key: string, title: string) =>
+    `<a ${active === key ? 'class="on"' : ''} href="${href}" title="${title}">${icon(name)}</a>`;
+  return `<nav class="rail"><div class="logo">S</div>
+    ${it('/admin', 'grid', 'overview', 'Overview')}
+    ${it('/admin/approvals', 'inbox', 'approvals', 'Approvals')}
+    ${it('/admin/trading', 'coins', 'trading', 'Trading')}
+    <div class="spacer"></div>
+    <a href="/leaderboard" title="Public site">${icon('gauge')}</a>
+    <form method="post" action="/admin/logout"><button class="ghost" style="width:42px;height:42px;border-radius:11px;padding:0" title="Sign out">${icon('settings')}</button></form>
+  </nav>`;
+}
+
+/** Action-button script: data-act POSTs (with optional data-confirm), result into #out. */
+const ACTION_SCRIPT = `<script>
+  document.querySelectorAll('button[data-act]').forEach(function(b){
+    b.addEventListener('click', function(){
+      var c=b.getAttribute('data-confirm'); if(c && !confirm(c)) return;
+      var out=document.getElementById('out'); if(out){out.textContent=b.textContent.trim()+'\\u2026 running';}
+      b.disabled=true;
+      fetch(b.getAttribute('data-act'),{method:'POST'}).then(function(r){return r.text();})
+        .then(function(t){ if(out) out.textContent=t; b.disabled=false; })
+        .catch(function(e){ if(out) out.textContent='Error: '+e; b.disabled=false; });
+    });
+  });
+</script>`;
+
+/** ALPACA mode + kill-switch posture badge: OFF grey · PAPER amber · LIVE red. */
+function postureBadge(mode: string, paused: boolean): string {
+  const tone = mode === 'live' ? ['var(--bad)', 'LIVE'] : mode === 'paper' ? ['#c98a00', 'PAPER'] : ['var(--faint)', 'OFF'];
+  return `<span class="pill" style="background:${tone[0]};color:#fff;border:none">ALPACA · ${tone[1]}</span>` +
+    (paused ? ` <span class="pill" style="border-color:var(--bad);color:var(--bad)">⛔ PAUSED</span>` : '');
+}
+
+interface IntentRow { tip_id: string; ticker: string; notional_cents: number; sec_name: string; direction: string; conviction: string | null; evidence_span: string | null; source_name: string; tier: string | null }
+
+/** Trade intents awaiting operator approval (proposed). */
+async function proposedIntents(env: Env): Promise<IntentRow[]> {
+  return (await env.DB.prepare(
+    `SELECT ti.tip_id, ti.ticker, ti.notional_cents, sec.name sec_name, t.direction, t.conviction,
+            t.evidence_span, s.name source_name, sr.tier
+       FROM trade_intents ti JOIN tips t ON t.id=ti.tip_id JOIN securities sec ON sec.id=ti.security_id
+       JOIN sources s ON s.id=t.source_id LEFT JOIN source_ratings sr ON sr.source_id=s.id AND sr.dimension='horizon:90'
+      WHERE ti.status='proposed' ORDER BY ti.created_at ASC LIMIT 50`,
+  ).all<IntentRow>()).results ?? [];
+}
+
+/** Live-trade approval table with per-row Approve (confirm-gated) / Reject. */
+function liveTradeTable(rows: IntentRow[]): string {
+  if (rows.length === 0) return '<p class="muted">No live trades awaiting approval. ✓</p>';
+  return `<table><thead><tr><th>Ticker</th><th>Source</th><th>Dir</th><th>Conv</th><th class="num">Notional</th><th>Evidence</th><th></th></tr></thead><tbody>
+    ${rows.map((r) => {
+      const usd = (r.notional_cents / 100).toFixed(2);
+      return `<tr>
+        <td><b>${escapeHtml(r.ticker)}</b> <span class="muted" style="font-size:.76rem">${escapeHtml((r.sec_name || '').slice(0, 16))}</span></td>
+        <td>${escapeHtml(r.source_name)} ${r.tier ? `<span class="tier">${escapeHtml(r.tier)}</span>` : ''}</td>
+        <td>${escapeHtml(r.direction)}</td><td>${escapeHtml(r.conviction || '–')}</td>
+        <td class="num">$${usd}</td>
+        <td class="muted" style="white-space:normal;max-width:240px;font-size:.78rem">${escapeHtml((r.evidence_span || '').slice(0, 110))}</td>
+        <td style="white-space:nowrap">
+          <button data-act="/admin/approve-trade?tip=${encodeURIComponent(r.tip_id)}" data-confirm="Place a REAL $${usd} order in ${escapeHtml(r.ticker)}? This moves real money.">Approve</button>
+          <button class="ghost" data-act="/admin/reject-trade?tip=${encodeURIComponent(r.tip_id)}">Reject</button>
+        </td></tr>`;
+    }).join('')}
+  </tbody></table>`;
+}
 
 function shell(title: string, body: string): Response {
   const html = `<!doctype html><html lang="en"><head><meta charset="utf-8">
@@ -208,6 +279,9 @@ export async function adminDashboard(env: Env): Promise<Response> {
     `SELECT sr.dimension, s.name source_name, sr.tier, sr.n_tips, sr.hit_rate, sr.avg_excess_pct, sr.score_lower, sr.rank FROM source_ratings sr JOIN sources s ON s.id=sr.source_id ORDER BY sr.dimension, sr.rank LIMIT 80`);
   const ops = await rows<{ kind: string; created_at: string; detail: string }>(env, `SELECT kind, created_at, substr(detail,1,90) detail FROM ops_events ORDER BY created_at DESC LIMIT 7`);
 
+  const pendingLive = (await env.DB.prepare(`SELECT COUNT(*) n FROM trade_intents WHERE status='proposed'`).first<{ n: number }>())?.n ?? 0;
+  const brokerMode = await alpacaMode(env);
+  const tradingHalted = await tradingPaused(env);
   const navLast = navSeries[navSeries.length - 1];
   const navRet = navLast ? navLast.nav_index / 1000 - 1 : null;
   const overallHit = hitAgg && hitAgg.n ? hitAgg.hits / hitAgg.n : null;
@@ -230,18 +304,7 @@ export async function adminDashboard(env: Env): Promise<Response> {
   const dimGroups = ratings.reduce((acc: Record<string, typeof ratings>, r) => { (acc[r.dimension] ??= []).push(r); return acc; }, {});
 
   const body = `<div class="app">
-    <nav class="rail">
-      <div class="logo">S</div>
-      <a class="on" href="/admin" title="Dashboard">${icon('grid')}</a>
-      <a href="#sharers" title="Sharers">${icon('users')}</a>
-      <a href="#shares" title="Shares">${icon('trend')}</a>
-      <a href="#activity" title="Activity">${icon('pulse')}</a>
-      <a href="#newsletter" title="Newsletter">${icon('mail')}</a>
-      <div class="spacer"></div>
-      <a href="/leaderboard" title="Public site">${icon('gauge')}</a>
-      <form method="post" action="/admin/logout"><button class="ghost" style="width:42px;height:42px;border-radius:11px;padding:0" title="Sign out">${icon('settings')}</button></form>
-    </nav>
-
+    ${railNav('overview')}
     <div class="main">
       <header class="topbar">
         <div class="search">${icon('grid', 15)}<span>Shareo · empirical tip accountability</span><kbd style="margin-left:auto">live</kbd></div>
@@ -254,6 +317,12 @@ export async function adminDashboard(env: Env): Promise<Response> {
       </header>
 
       <div class="content">
+        <!-- POSTURE STRIP -->
+        <div style="display:flex;align-items:center;gap:12px;flex-wrap:wrap;${brokerMode === 'live' ? 'border-top:3px solid var(--bad);padding-top:10px' : ''}">
+          ${postureBadge(brokerMode, tradingHalted)}
+          <span class="pill">LICENCE · ${env.PUBLIC_PRICES === 'on' ? 'commercial' : 'personal'}</span>
+          ${pendingLive ? `<a href="/admin/approvals" class="pill" style="background:var(--bad);color:#fff;border:none;text-decoration:none">${pendingLive} live trade${pendingLive === 1 ? '' : 's'} awaiting approval →</a>` : ''}
+        </div>
         <!-- HERO -->
         <section class="hero">
           <svg class="gridbg" width="100%" height="100%"><defs><pattern id="g" width="40" height="40" patternUnits="userSpaceOnUse"><path d="M 40 0 L 0 0 0 40" fill="none" stroke="#fff" stroke-width="0.5"/></pattern></defs><rect width="100%" height="100%" fill="url(#g)"/></svg>
@@ -358,4 +427,91 @@ export async function adminDashboard(env: Env): Promise<Response> {
     });
   </script>`;
   return shell('Dashboard', body);
+}
+
+// ── Approvals view ───────────────────────────────────────────────────
+export async function adminApprovals(env: Env): Promise<Response> {
+  const live = await proposedIntents(env);
+  const reviewTips = (await env.DB.prepare(`SELECT COUNT(*) n FROM tips WHERE status='review'`).first<{ n: number }>())?.n ?? 0;
+  const failed = (await env.DB.prepare(
+    `SELECT ti.tip_id, ti.ticker, ti.reason FROM trade_intents ti WHERE ti.status='failed' ORDER BY ti.created_at DESC LIMIT 20`,
+  ).all<{ tip_id: string; ticker: string; reason: string | null }>()).results ?? [];
+
+  const body = `<div class="app">${railNav('approvals')}<div class="main">
+    <header class="topbar"><div class="search">${icon('inbox', 15)}<span>Approvals — what needs you</span></div><button onclick="location.reload()">↻ Refresh</button></header>
+    <div class="content">
+      <h2 style="margin-top:0">Live trades awaiting approval ${live.length ? `<span class="pill" style="background:var(--bad);color:#fff;border:none">${live.length}</span>` : ''}</h2>
+      <div class="panel">${liveTradeTable(live)}</div>
+      <pre id="out" class="muted">Approve places a real (capped) Alpaca order via the single execute path. Reject leaves the call as a paper-only scoring record.</pre>
+
+      ${failed.length ? `<h2>Failed real buys (retryable) <span class="pill">${failed.length}</span></h2>
+      <div class="panel"><table><thead><tr><th>Ticker</th><th>Reason</th><th></th></tr></thead><tbody>
+      ${failed.map((f) => `<tr><td><b>${escapeHtml(f.ticker)}</b></td><td class="muted">${escapeHtml(f.reason || '')}</td>
+        <td><button data-act="/admin/reject-trade?tip=${encodeURIComponent(f.tip_id)}" class="ghost">Dismiss</button></td></tr>`).join('')}
+      </tbody></table><p class="muted" style="font-size:.78rem">Retry-on-approve and re-propose ship in a later slice; for now a failed intent stays as paper and can be dismissed.</p></div>` : ''}
+
+      <h2>Tip review queue <span class="pill">${reviewTips}</span></h2>
+      <div class="panel"><p class="muted">${reviewTips} unresolved tip(s) (abstained security). The resolve / add-alias / dismiss workbench is Slice 2.</p></div>
+    </div>${ACTION_SCRIPT}</div></div>`;
+  return shell('Approvals', body);
+}
+
+// ── Trading view ─────────────────────────────────────────────────────
+export async function adminTrading(env: Env): Promise<Response> {
+  const mode = await alpacaMode(env);
+  const paused = await tradingPaused(env);
+  const live = await proposedIntents(env);
+  const realCount = (await env.DB.prepare(`SELECT COUNT(*) n FROM positions WHERE mode='real'`).first<{ n: number }>())?.n ?? 0;
+  const openNotional = (await env.DB.prepare(
+    `SELECT COALESCE(SUM(ti.notional_cents),0) c FROM trade_intents ti JOIN positions p ON p.tip_id=ti.tip_id WHERE ti.status='executed' AND p.status='open'`,
+  ).first<{ c: number }>())?.c ?? 0;
+  const ordersToday = (await env.DB.prepare(
+    `SELECT COUNT(*) n FROM trade_intents WHERE status='executed' AND substr(executed_at,1,10)=?`,
+  ).bind(dateOnly(nowISO())).first<{ n: number }>())?.n ?? 0;
+  const maxDaily = Math.max(1, Number(env.MAX_DAILY_TRADES) || 5);
+  const maxOpenCents = Math.max(100, Number(env.MAX_OPEN_REAL_NOTIONAL_CENTS) || 20000);
+  const real = (await env.DB.prepare(
+    `SELECT sec.ticker, p.broker_order_id, p.real_buy_status, p.status, ti.notional_cents
+       FROM positions p JOIN securities sec ON sec.id=p.security_id LEFT JOIN trade_intents ti ON ti.tip_id=p.tip_id
+      WHERE p.mode='real' ORDER BY p.entry_at DESC LIMIT 20`,
+  ).all<{ ticker: string; broker_order_id: string | null; real_buy_status: string | null; status: string; notional_cents: number | null }>()).results ?? [];
+
+  const card = (k: string, v: string, sub = '') => `<div class="card"><div class="k">${k}</div><div class="v">${v}</div>${sub ? `<div class="sub">${sub}</div>` : ''}</div>`;
+  const body = `<div class="app">${railNav('trading')}<div class="main">
+    <header class="topbar"><div class="search">${icon('coins', 15)}<span>Trading — brokerage posture &amp; live exposure</span></div>
+      <div>${postureBadge(mode, paused)}</div></header>
+    <div class="content">
+      ${mode === 'live' ? `<div class="panel" style="border-color:var(--bad);border-width:2px"><b style="color:var(--bad)">LIVE mode:</b> every approved trade places real money (≤$${MAX_NOTIONAL_USD}/order).</div>` : ''}
+
+      <h2 style="margin-top:0">Controls</h2>
+      <div class="panel"><div class="actions">
+        ${paused
+          ? `<button data-act="/admin/trading-resume" data-confirm="Resume live trading?">▶ Resume trading</button>`
+          : `<button data-act="/admin/trading-pause" data-confirm="Pause ALL real trading (kill-switch)?">⛔ Pause trading</button>`}
+        <span class="muted" style="margin:0 .4rem">Mode:</span>
+        <button class="ghost" data-act="/admin/set-alpaca-mode?mode=off" data-confirm="Set broker mode to OFF (no orders)?">Off</button>
+        <button class="ghost" data-act="/admin/set-alpaca-mode?mode=paper" data-confirm="Set broker mode to PAPER (simulated)?">Paper</button>
+        <button data-act="/admin/set-alpaca-mode?mode=live" data-confirm="Set broker mode to LIVE — real money on every APPROVED trade. Continue?">Live</button>
+      </div><pre id="out" class="muted" style="margin-top:12px">Mode + kill-switch are KV overrides (no redeploy). The kill-switch fails closed.</pre></div>
+
+      <h2>Exposure</h2>
+      <div class="grid stats">
+        ${card('Pending approval', String(live.length), live.length ? '<a href="/admin/approvals">review queue →</a>' : 'none')}
+        ${card('Real positions', String(realCount), 'open + closed')}
+        ${card('Open real exposure', `$${(openNotional / 100).toFixed(0)}`, `cap $${(maxOpenCents / 100).toFixed(0)}`)}
+        ${card('Orders today', `${ordersToday}<small>/${maxDaily}</small>`, `per-order cap $${MAX_NOTIONAL_USD}`)}
+      </div>
+
+      <h2>Pending live trades</h2>
+      <div class="panel">${liveTradeTable(live)}</div>
+
+      <h2>Real positions</h2>
+      <div class="panel">${real.length === 0 ? '<p class="muted">No real (broker) positions yet.</p>' :
+        `<table><thead><tr><th>Ticker</th><th>Order id</th><th>Buy status</th><th>Position</th><th class="num">Notional</th></tr></thead><tbody>
+        ${real.map((p) => `<tr><td><b>${escapeHtml(p.ticker)}</b></td><td class="mono muted" style="font-size:.74rem">${escapeHtml((p.broker_order_id || '–').slice(0, 14))}</td>
+          <td><span class="pill">${escapeHtml(p.real_buy_status || '–')}</span></td><td>${escapeHtml(p.status)}</td>
+          <td class="num">${p.notional_cents == null ? '–' : '$' + (p.notional_cents / 100).toFixed(2)}</td></tr>`).join('')}
+        </tbody></table>`}</div>
+    </div>${ACTION_SCRIPT}</div></div>`;
+  return shell('Trading', body);
 }

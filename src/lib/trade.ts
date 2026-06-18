@@ -6,10 +6,12 @@
  * no position yet and open one once the entry bar is available. v1 is paper-only; real Alpaca buys
  * arrive in Slice 3 (gated to US + affordable + confirmed).
  */
-import type { Env, Security } from '../types.js';
-import { uid, nowISO, logOps } from './db.js';
+import type { Env } from '../types.js';
+import type { Security } from '../types.js';
+import { uid, nowISO, dateOnly, logOps } from './db.js';
 import { getEntryBar } from './prices.js';
-import { submitBuy, eligibleForRealBuy, alpacaMode } from './alpaca.js';
+import { submitBuy, eligibleForRealBuy, alpacaMode, tradingPaused, notionalUsd } from './alpaca.js';
+import { tradeCaps, capDecision } from './tradecaps.js';
 
 const DIRECTIONAL = new Set(['buy', 'bullish', 'sell', 'bearish']);
 
@@ -68,23 +70,88 @@ async function openOne(env: Env, tip: PendingTip): Promise<boolean> {
   ).bind(uid(), tip.id, sec.id, market, entry.date, entry.raw, entry.adj, `pos:${tip.id}`, nowISO()).run();
   if (!ins.meta.changes) return false; // position already existed — never re-buy
 
-  // Optionally place a real (disclosed, tiny) broker buy. Scoring still uses the EODHD entry above;
-  // this is real exposure only. Gated: ALPACA_MODE != off, US, long. A broker error never fails the position.
-  if (eligibleForRealBuy(env, sec, tip.direction)) {
-    try {
-      const r = await submitBuy(env, sec.ticker, tip.id); // client_order_id = tip.id → broker-side idempotency
-      if (r.ok) {
-        await env.DB.prepare(`UPDATE positions SET mode = 'real', broker = 'alpaca', broker_order_id = ? WHERE tip_id = ?`)
-          .bind(r.orderId ?? null, tip.id).run();
-        await logOps(env, 'trade', { tip: tip.id, ticker: sec.ticker, mode: alpacaMode(env), order: r.orderId });
-      } else {
-        await logOps(env, 'trade', { tip: tip.id, ticker: sec.ticker, real_skipped: r.reason });
-      }
-    } catch (err) {
-      await logOps(env, 'error', { at: 'submitBuy', tip: tip.id, err: String(err) });
-    }
+  // Real exposure is GATED behind a trade_intent — NO broker call happens here. If eligible, record
+  // an intent: in paper it auto-approves (simulated, one-click), in live it stays 'proposed' until an
+  // operator approves it. executeApprovedTrades is the ONLY place a real order is ever placed.
+  if (await eligibleForRealBuy(env, sec, tip.direction)) {
+    const mode = await alpacaMode(env); // 'paper' | 'live' (off already excluded by eligibility)
+    const status = mode === 'paper' ? 'approved' : 'proposed';
+    await env.DB.prepare(
+      `INSERT OR IGNORE INTO trade_intents
+         (id, tip_id, security_id, ticker, notional_cents, mode, status, approved_at, created_at)
+       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+    ).bind(uid(), tip.id, sec.id, sec.ticker, Math.round(notionalUsd(env) * 100), mode, status,
+      status === 'approved' ? nowISO() : null, nowISO()).run();
+    await logOps(env, 'trade', { tip: tip.id, ticker: sec.ticker, intent: status, mode });
   }
 
   await env.DB.prepare(`UPDATE tips SET status = 'tracking' WHERE id = ?`).bind(tip.id).run();
   return true;
+}
+
+
+/**
+ * The ONLY caller of submitBuy. Drains 'approved' trade_intents oldest-first, places the real order,
+ * and records the outcome. Safe by construction:
+ *  - fail-closed kill-switch (bails if trading paused, re-checked per item),
+ *  - compare-and-swap claim (approved→executing) so a double-click / overlapping cron sweep can
+ *    NEVER double-execute the same intent,
+ *  - code-defaulted daily-count + open-notional caps re-checked before each order,
+ *  - per-item try/catch (one failure is logged + retryable, never aborts the run),
+ *  - bounded LIMIT (≤20 Alpaca calls/run), observable via ops_events.
+ * Runs on Approve, and as a sweep on the hourly + daily crons (for any approved-but-unexecuted intent).
+ */
+export async function executeApprovedTrades(env: Env, limit = 20): Promise<{ executed: number; failed: number; deferred: number }> {
+  if (await tradingPaused(env)) return { executed: 0, failed: 0, deferred: 0 };
+  const caps = tradeCaps(env);
+  const today = dateOnly(nowISO());
+  const todayRow = await env.DB.prepare(
+    `SELECT COUNT(*) n FROM trade_intents WHERE status='executed' AND substr(executed_at,1,10)=?`,
+  ).bind(today).first<{ n: number }>();
+  const openRow = await env.DB.prepare(
+    `SELECT COALESCE(SUM(ti.notional_cents),0) c FROM trade_intents ti JOIN positions p ON p.tip_id=ti.tip_id
+      WHERE ti.status='executed' AND p.status='open'`,
+  ).first<{ c: number }>();
+  let execCount = todayRow?.n ?? 0;
+  let openCents = openRow?.c ?? 0;
+
+  const intents = (await env.DB.prepare(
+    `SELECT id, tip_id, ticker, notional_cents FROM trade_intents WHERE status='approved' ORDER BY created_at ASC LIMIT ?`,
+  ).bind(limit).all<{ id: string; tip_id: string; ticker: string; notional_cents: number }>()).results ?? [];
+
+  let executed = 0, failed = 0, deferred = 0;
+  for (const it of intents) {
+    try {
+      const cap = capDecision(execCount, openCents, it.notional_cents, caps);
+      if (cap !== 'ok') { deferred++; await logOps(env, 'trade', { tip: it.tip_id, deferred: cap }); continue; }
+      if (await tradingPaused(env)) { deferred++; break; } // halt mid-sweep if paused
+      // CAS claim — only one caller can move approved→executing.
+      const claim = await env.DB.prepare(
+        `UPDATE trade_intents SET status='executing', executed_at=? WHERE id=? AND status='approved'`,
+      ).bind(nowISO(), it.id).run();
+      if (!claim.meta.changes) continue; // already claimed by a concurrent run
+      const r = await submitBuy(env, it.ticker, it.tip_id); // idempotent via client_order_id=tip_id
+      if (r.ok) {
+        await env.DB.prepare(`UPDATE trade_intents SET status='executed', broker_order_id=?, reason=? WHERE id=?`)
+          .bind(r.orderId ?? null, r.reason ?? null, it.id).run();
+        await env.DB.prepare(`UPDATE positions SET mode='real', broker='alpaca', broker_order_id=?, real_buy_status='placed' WHERE tip_id=?`)
+          .bind(r.orderId ?? null, it.tip_id).run();
+        await logOps(env, 'trade', { tip: it.tip_id, ticker: it.ticker, executed: true, order: r.orderId });
+        executed++; execCount++; openCents += it.notional_cents;
+      } else {
+        await env.DB.prepare(`UPDATE trade_intents SET status='failed', reason=? WHERE id=?`).bind(r.reason ?? 'unknown', it.id).run();
+        await env.DB.prepare(`UPDATE positions SET real_buy_status='failed' WHERE tip_id=?`).bind(it.tip_id).run();
+        await logOps(env, 'trade', { tip: it.tip_id, ticker: it.ticker, failed: r.reason });
+        failed++;
+      }
+    } catch (err) {
+      // Claimed-but-threw → mark failed (retryable), never leave stuck in 'executing'.
+      await env.DB.prepare(`UPDATE trade_intents SET status='failed', reason=? WHERE id=? AND status='executing'`)
+        .bind(String(err).slice(0, 120), it.id).run();
+      await logOps(env, 'error', { at: 'executeApprovedTrades', tip: it.tip_id, err: String(err) });
+      failed++;
+    }
+  }
+  if (executed || failed || deferred) await logOps(env, 'trade', { job: 'executeApprovedTrades', executed, failed, deferred });
+  return { executed, failed, deferred };
 }
