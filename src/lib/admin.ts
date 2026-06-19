@@ -254,6 +254,15 @@ ${BRAND_HEAD}
   .ring-wrap { display: flex; align-items: center; gap: 22px; }
   .actions { display: flex; gap: 8px; flex-wrap: wrap; align-items: center; }
   .jobwrap { display: inline-flex; align-items: center; gap: 3px; }
+  /* sub-page primitives (errors / approvals / trading) */
+  h2 { font-family: var(--font-display); font-weight: 400; text-transform: uppercase; letter-spacing: .02em; font-size: 15px; margin: 20px 0 10px; }
+  .panel { background: var(--card); border: 1px solid var(--line); border-radius: var(--r-lg); box-shadow: var(--shadow-sm); padding: 16px 18px; overflow-x: auto; }
+  .grid.stats { display: grid; grid-template-columns: repeat(auto-fit, minmax(155px, 1fr)); gap: 14px; }
+  .grid.stats .card { padding: 16px 18px; }
+  .grid.stats .k { font-family: var(--font-mono); font-size: 10px; text-transform: uppercase; letter-spacing: .06em; color: var(--muted); display: flex; align-items: center; }
+  .grid.stats .v { font-family: var(--font-display); font-size: 30px; line-height: 1; margin-top: 6px; }
+  .grid.stats .sub { font-size: 11px; color: var(--muted); margin-top: 5px; }
+  .grid.stats .sub a { color: var(--muted); }
   button { font: inherit; font-weight: 600; padding: 9px 16px; border: none; border-radius: var(--r-pill); background: var(--ink); color: var(--on-dark); cursor: pointer; }
   button.ghost { background: var(--card); color: var(--text); border: 1px solid var(--line); }
   button:hover { opacity: .9; } button:disabled { opacity: .5; }
@@ -421,7 +430,7 @@ export async function adminDashboard(env: Env): Promise<Response> {
 
   // Needs-attention triage (operational). Each item links to where the operator resolves it.
   const triage = [
-    err24?.n ? { sev: 'high', kind: 'Errors', t: `${err24.n} error event${err24.n === 1 ? '' : 's'} in 24h`, d: 'Open the Live activity feed below to read them', href: '#activity' } : null,
+    err24?.n ? { sev: 'high', kind: 'Errors', t: `${err24.n} error event${err24.n === 1 ? '' : 's'} in 24h`, d: 'Open the errors page to see what is breaking', href: '/admin/errors' } : null,
     spentPct >= 90 ? { sev: 'high', kind: 'Budget', t: `LLM spend at ${spentPct}% of cap`, d: 'AI extraction defers until the daily reset (00:00 UTC)', href: '#jobs' } : null,
     reviewTips?.n ? { sev: 'med', kind: 'Review', t: `${reviewTips.n} tip${reviewTips.n === 1 ? '' : 's'} need review`, d: 'Unresolved security — open the review queue (view-only for now)', href: '/admin/approvals' } : null,
     pendPos?.n ? { sev: 'med', kind: 'Pipeline', t: `${pendPos.n} resolved tip${pendPos.n === 1 ? '' : 's'} awaiting a position`, d: 'Run the daily pass below to open + value them', href: '#jobs' } : null,
@@ -541,7 +550,7 @@ export async function adminDashboard(env: Env): Promise<Response> {
                 <table><thead><tr><th>#</th><th>Sharer</th><th class="num">Tips${tip('rep-col-tips')}</th><th class="num">Hit${tip('rep-col-hit')}</th><th class="num">Alpha${tip('rep-col-alpha')}</th><th class="num">Score${tip('rep-col-score')}</th></tr></thead><tbody>
                 ${rs.map((r) => `<tr><td class="num">${r.rank}</td><td>${escapeHtml(r.source_name)}</td><td class="num">${r.n_tips}</td><td class="num">${Math.round(r.hit_rate * 100)}%</td>${sign(r.avg_excess_pct)}<td class="num"><b>${r.score_lower.toFixed(0)}</b></td></tr>`).join('')}
                 </tbody></table></div>`).join('')}</div></section>
-          <section class="card dark"><header><div><h3>Live activity${tip('activity-feed')}</h3><p class="csub">Recent ops events</p></div><span style="display:inline-flex;align-items:center;gap:6px;font-size:11px;color:rgba(255,255,255,.6)"><span style="width:6px;height:6px;border-radius:50%;background:#5bbb6b;box-shadow:0 0 0 3px rgba(91,187,107,.18)"></span>Live</span></header>
+          <section class="card dark"><header><div><h3>Live activity${tip('activity-feed')}</h3><p class="csub">Recent ops events · <a href="/admin/errors" style="color:rgba(255,255,255,.8)">all errors →</a></p></div><span style="display:inline-flex;align-items:center;gap:6px;font-size:11px;color:rgba(255,255,255,.6)"><span style="width:6px;height:6px;border-radius:50%;background:#5bbb6b;box-shadow:0 0 0 3px rgba(91,187,107,.18)"></span>Live</span></header>
             <div class="body feed">${ops.map((o) => `<div class="f"><div class="ic">${icon('pulse', 14)}</div>
               <div style="min-width:0"><div style="font-size:13px;${o.kind === 'error' ? 'color:var(--bad-soft)' : ''}">${escapeHtml(o.kind)}</div><div class="mono" style="font-size:11px;color:rgba(255,255,255,.45);overflow:hidden;text-overflow:ellipsis;white-space:nowrap">${escapeHtml(o.detail || '')}</div></div>
               <span class="mono" style="font-size:10px;color:rgba(255,255,255,.45)">${escapeHtml(o.created_at.slice(11, 16))}</span></div>`).join('')}</div></section>
@@ -590,6 +599,81 @@ export async function adminApprovals(env: Env): Promise<Response> {
       <div class="panel"><p class="muted">${reviewTips} unresolved tip(s) (abstained security). View-only for now — the resolve / add-alias / dismiss workbench is Slice 2.</p></div>
     </div>${ACTION_SCRIPT}</div></div>`;
   return shell('Approvals', body);
+}
+
+// ── Errors view ──────────────────────────────────────────────────────
+interface OpsRow { id: string; detail: string | null; created_at: string }
+
+/** Normalise an error row into a stable signature so identical failures group together. */
+function errSignature(detail: string | null): { at: string; sig: string } {
+  if (!detail) return { at: 'unknown', sig: 'unknown' };
+  let o: Record<string, unknown> | null = null;
+  try { o = JSON.parse(detail) as Record<string, unknown>; } catch { return { at: 'unparsed', sig: detail.slice(0, 70) }; }
+  const at = String(o.at ?? o.stage ?? 'unknown');
+  let msg = o.err != null ? String(o.err) : o.status != null ? `status ${String(o.status)}` : '';
+  msg = msg
+    .replace(/\b[A-Z0-9]{1,6}\.[A-Z]{2,5}\b/g, '<sym>') // TICKER.EXCHANGE
+    .replace(/[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}/gi, '<id>')
+    .replace(/\b\d{4}-\d{2}-\d{2}([T ][\d:.]+Z?)?\b/g, '<time>');
+  return { at, sig: msg ? `${at} · ${msg}` : at };
+}
+
+/** Operator-facing diagnosis for known failure signatures. */
+function errHint(sig: string): string | null {
+  if (/EODHD/.test(sig) && /\b40[0-9]\b/.test(sig)) {
+    if (/\b402\b/.test(sig)) return 'EODHD market-data API returned 402 (Payment Required). This is account-wide — either the EODHD subscription lapsed/payment failed, or the daily API-call limit is exhausted (each daily valuation calls EODHD per security). Check the EODHD account plan + daily usage, or the EODHD_API_KEY secret. While 402 persists, NAV, returns and hit-rate stop updating.';
+    if (/\b401\b/.test(sig)) return 'EODHD returned 401 (Unauthorized) — the EODHD_API_KEY secret is missing or wrong. Re-set it with wrangler secret put EODHD_API_KEY.';
+    return 'EODHD market-data API is rejecting requests — pricing, NAV and returns will not update until it recovers.';
+  }
+  if (/fetchFeed/.test(sig) && /\b(429|5\d\d)\b/.test(sig)) return 'A producer feed is rate-limiting (429) or down (5xx). Usually transient and external — the poller retries next cycle. Persistent failures may mean a dead/blocked feed URL.';
+  return null;
+}
+
+export async function adminErrors(env: Env): Promise<Response> {
+  const recent = (await env.DB.prepare(
+    `SELECT id, detail, created_at FROM ops_events WHERE kind='error' AND created_at >= datetime('now','-7 day') ORDER BY created_at DESC LIMIT 500`,
+  ).all<OpsRow>()).results ?? [];
+  const dayAgo = new Date(Date.now() - 86_400_000).toISOString();
+
+  // Group by signature.
+  const groups = new Map<string, { at: string; sig: string; n24: number; n7: number; last: string; sample: string }>();
+  for (const r of recent) {
+    const { at, sig } = errSignature(r.detail);
+    const g = groups.get(sig) ?? { at, sig, n24: 0, n7: 0, last: r.created_at, sample: r.detail ?? '' };
+    g.n7 += 1;
+    if (r.created_at >= dayAgo) g.n24 += 1;
+    if (r.created_at > g.last) g.last = r.created_at;
+    groups.set(sig, g);
+  }
+  const ranked = [...groups.values()].sort((a, b) => b.n24 - a.n24 || b.n7 - a.n7);
+  const n24total = recent.filter((r) => r.created_at >= dayAgo).length;
+  const hints = [...new Set(ranked.map((g) => errHint(g.sig)).filter(Boolean) as string[])];
+
+  const body = `<div class="app">${railNav('overview')}<div class="main">
+    <header class="topbar"><div class="search">${icon('pulse', 15)}<span>Errors — what is breaking</span></div>
+      <a href="/admin" class="pill" style="text-decoration:none">← Overview</a>
+      <button onclick="location.reload()">↻ Refresh</button></header>
+    <div class="content">
+      ${hints.length ? hints.map((h) => `<div class="panel" style="border-color:var(--bad);border-width:2px;background:color-mix(in srgb, var(--bad) 7%, var(--card));padding:14px 16px"><b style="color:var(--bad)">Likely cause:</b> ${escapeHtml(h)}</div>`).join('') : ''}
+
+      <h2 style="margin-top:0">Error groups <span class="muted" style="font-weight:400;font-size:.8em">· ${n24total} in 24h · ${recent.length} in 7d</span></h2>
+      <div class="panel">${ranked.length === 0 ? '<p class="muted">No errors in the last 7 days. ✓</p>' :
+        `<table><thead><tr><th>Stage</th><th>Signature</th><th class="num">24h</th><th class="num">7d</th><th>Last seen</th></tr></thead><tbody>
+        ${ranked.map((g) => `<tr>
+          <td><span class="pill">${escapeHtml(g.at)}</span></td>
+          <td class="muted" style="white-space:normal;max-width:420px;font-size:.82rem">${escapeHtml(g.sig)}</td>
+          <td class="num"><b>${g.n24}</b></td><td class="num">${g.n7}</td>
+          <td class="mono muted" style="font-size:.74rem">${escapeHtml(g.last.slice(0, 16).replace('T', ' '))}</td></tr>`).join('')}
+        </tbody></table>`}</div>
+
+      <h2>Recent errors (raw)</h2>
+      <div class="panel">${recent.length === 0 ? '<p class="muted">None.</p>' :
+        `<table><thead><tr><th>When (UTC)</th><th>Detail</th></tr></thead><tbody>
+        ${recent.slice(0, 100).map((r) => `<tr><td class="mono muted" style="font-size:.72rem;white-space:nowrap">${escapeHtml(r.created_at.slice(0, 19).replace('T', ' '))}</td>
+          <td class="mono" style="white-space:normal;word-break:break-word;font-size:.74rem">${escapeHtml(r.detail || '')}</td></tr>`).join('')}
+        </tbody></table>${recent.length > 100 ? `<p class="muted" style="font-size:.78rem">Showing 100 of ${recent.length} (7-day window, capped at 500).</p>` : ''}`}</div>
+    </div></div></div>`;
+  return shell('Errors', body);
 }
 
 // ── Trading view ─────────────────────────────────────────────────────

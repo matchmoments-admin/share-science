@@ -23,7 +23,7 @@ import { pollPodcastSources } from './lib/producers/podcast.js';
 import { leaderboard, leaderboardJson, navJson, sourcePage, tipPage, securityPage, methodologyPage } from './lib/pages.js';
 import { landingPage, handleSubscribe, syncSubscribersToBeehiiv } from './lib/landing.js';
 import { generateAndStoreDigest, publishDigestToBeehiiv } from './lib/content.js';
-import { adminCookie, adminDashboard, adminApprovals, adminTrading, adminLoginPage, handleAdminLogin, handleAdminLogout } from './lib/admin.js';
+import { adminCookie, adminDashboard, adminApprovals, adminTrading, adminErrors, adminLoginPage, handleAdminLogin, handleAdminLogout } from './lib/admin.js';
 
 const EXTRACT_BUDGET_CENTS = 5; // headroom before an extraction call (multi-tip ≈ a few cents)
 const MAX_TIPS_PER_ITEM = 35; // covers a full multi-analyst episode (e.g. The Call ~13 stocks × 2); still bounded
@@ -298,6 +298,7 @@ export default {
     // Admin drill-down views (token-gated).
     if (url.pathname === '/admin/approvals' && req.method === 'GET') return authed(req, env) ? adminApprovals(env) : adminLoginPage();
     if (url.pathname === '/admin/trading' && req.method === 'GET') return authed(req, env) ? adminTrading(env) : adminLoginPage();
+    if (url.pathname === '/admin/errors' && req.method === 'GET') return authed(req, env) ? adminErrors(env) : adminLoginPage();
     // Trade approval + brokerage controls (mutations).
     if (url.pathname === '/admin/approve-trade' && req.method === 'POST') return handleApproveTrade(req, env);
     if (url.pathname === '/admin/reject-trade' && req.method === 'POST') return handleRejectTrade(req, env);
