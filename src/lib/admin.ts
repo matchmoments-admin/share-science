@@ -35,9 +35,87 @@ const ICON: Record<string, string> = {
   settings: '<circle cx="12" cy="12" r="3"/><path d="M19.4 15a1.65 1.65 0 0 0 .33 1.82l.06.06a2 2 0 1 1-2.83 2.83l-.06-.06a1.65 1.65 0 0 0-1.82-.33 1.65 1.65 0 0 0-1 1.51V21a2 2 0 1 1-4 0v-.09A1.65 1.65 0 0 0 9 19.4a1.65 1.65 0 0 0-1.82.33l-.06.06a2 2 0 1 1-2.83-2.83l.06-.06a1.65 1.65 0 0 0 .33-1.82 1.65 1.65 0 0 0-1.51-1H3a2 2 0 1 1 0-4h.09A1.65 1.65 0 0 0 4.6 9a1.65 1.65 0 0 0-.33-1.82l-.06-.06a2 2 0 1 1 2.83-2.83l.06.06a1.65 1.65 0 0 0 1.82.33H9a1.65 1.65 0 0 0 1-1.51V3a2 2 0 1 1 4 0v.09a1.65 1.65 0 0 0 1 1.51 1.65 1.65 0 0 0 1.82-.33l.06-.06a2 2 0 1 1 2.83 2.83l-.06.06a1.65 1.65 0 0 0-.33 1.82V9a1.65 1.65 0 0 0 1.51 1H21a2 2 0 1 1 0 4h-.09a1.65 1.65 0 0 0-1.51 1z"/>',
   inbox: '<path d="M22 12h-6l-2 3h-4l-2-3H2"/><path d="M5.45 5.11 2 12v6a2 2 0 0 0 2 2h16a2 2 0 0 0 2-2v-6l-3.45-6.89A2 2 0 0 0 16.76 4H7.24a2 2 0 0 0-1.79 1.11z"/>',
   coins: '<circle cx="8" cy="8" r="6"/><path d="M18.09 10.37A6 6 0 1 1 10.34 18M7 6h1v4M16.71 13.88l.7.71-2.82 2.82"/>',
+  info: '<circle cx="12" cy="12" r="10"/><path d="M12 16v-4"/><path d="M12 8h.01"/>',
 };
 const icon = (name: string, size = 18) =>
   `<svg width="${size}" height="${size}" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round">${ICON[name] || ''}</svg>`;
+
+// ── Help system ──────────────────────────────────────────────────────
+// Plain-English copy for every meaningful field/section, sourced from the real code paths.
+// Rendered as a focusable ⓘ that opens a floating tooltip (see shell() CSS + script). Keep
+// factual/backward-looking — never advice (CLAUDE.md invariant).
+const TIP: Record<string, string> = {
+  // posture strip
+  'posture-alpaca-mode': "Broker wiring state. OFF: no orders ever placed. PAPER (amber): orders go to Alpaca's simulated sandbox. LIVE (red): real money on every approved trade. Read from a KV override falling back to the deployed default — unreadable KV fails safe, never auto-escalates to LIVE.",
+  'posture-paused': 'Shows only when the trading kill-switch is on. While shown, no real order executes and no new live intents are proposed. Unreadable KV also reads as paused — it fails closed. Toggle from the Trading view.',
+  'posture-licence': "Public-pricing display flag: 'commercial' when PUBLIC_PRICES=on, else 'personal'. Affects only how public price data is presented — no effect on broker behaviour or money movement.",
+  'posture-pending-live': 'Real-money buys (up to $50 each) queued for a human decision. Only appears above zero; click it to open the approvals queue. In PAPER mode intents auto-approve and never queue here.',
+  // hero
+  'hero-live-badge': "The pulsing dot is cosmetic; the real freshness signal is the date — the as-of of the latest NAV snapshot, which only advances when the daily pass runs. 'hypothetical' means every position is paper-traded. If the date is stale, run the daily pass.",
+  'hero-headline': 'If $1,000 had been spread evenly across every tracked tip, this is its value now. It is the NAV index: 1000 × (1 + the equal-weighted average return across all valued positions, open and closed). An index off a $1,000 base, not a real share price.',
+  'hero-lede': "Summary line. Calls = resolved tips (matched to a real security), sharers = active sources, and the percent is the share of settled outcomes that beat their market benchmark. Reads 'Outcomes accrue as calls settle' when nothing has settled yet.",
+  'herostat-journey': "Current value of the paper $1,000 portfolio (whole dollars). The coloured badge is total return since the $1,000 baseline (green up, red down). 'indexed off $1,000' means it starts at 1000 — an index, not a price.",
+  'herostat-hitrate': "Share of settled outcomes that beat their benchmark. The 'settled outcomes' count is tip_returns rows, and one tip yields up to three (30/90/365-day), so it exceeds the number of unique tips. Direction-aware: a buy hits on positive excess, a sell on negative.",
+  'herostat-alpha': "Average excess return over benchmark across settled outcomes — each position's own return minus its benchmark's over the same window. +2% means the tips beat their benchmark by 2 points on average. Shows a dash until something settles.",
+  // meta strip
+  'meta-shares': 'Distinct securities currently tracked. A stock tipped by five people counts once. A coverage/scale figure, not a quality figure.',
+  'meta-positions': 'Total paper trades ever opened, and how many are still running. A position closes automatically once its 365-day snapshot lands, so open ones are still marked-to-market daily; closed ones completed their full one-year evaluation.',
+  'meta-tips': 'Total tips ingested, and how many were matched to a real security. The gap is tips stuck in the review queue with no position — a large gap means tips are piling up there.',
+  'meta-subscribers': "Newsletter signups, and how many have been mirrored into beehiiv. A shortfall of active unsynced signups surfaces as a low-severity Newsletter item below; 'Sync subscribers' clears it.",
+  // trend + ring
+  'trend-chart': 'The paper $1,000 portfolio over the last 90 daily NAV points. The dashed line is the $1,000 baseline; area above means up, below means down. Equal-weighted across every tracked call and derived from the positions ledger — no live price calls.',
+  'ring-hitrate': "Overall share of settled outcomes that beat the market — the same figure as the Hit rate stat. Shows a dash (not 0%) when nothing has settled yet, so you can tell 'all calls missed' from 'no data yet'.",
+  'ring-horizon': 'Hit rate split by holding window. Each row shows the settled-outcome count and the percent that beat the benchmark; the dot is green at 50%+, else red. The 365-day row is the strongest long-term signal but has the fewest samples.',
+  // needs attention
+  'triage-section': "Operational items, highest severity first: Errors and Budget (red), Review and Pipeline (amber), Newsletter (grey). Shows 'All clear' when empty. Each card is clickable — it jumps to where you resolve it.",
+  // jobs
+  'jobs-section': 'Manual triggers for the background tasks that normally run on a schedule. Each button POSTs to an admin endpoint and dumps the raw result into the box below. The metrics above do NOT live-update — reload the page to see them move.',
+  'jobs-spend': "Today's metered AI spend against the daily cap. Counts only LLM tip extraction and weekly digest drafting — market-data and beehiiv calls are unmetered. Resets at 00:00 UTC. At the cap, new AI extraction defers; free jobs keep running.",
+  'job-run-daily': 'Opens positions for approved tips, re-prices everything, and recomputes the leaderboard and the $1,000 chart. Uses market data (not budget-metered). Idempotent — safe to click repeatedly. Run it after approving trades or a poll, or when the chart looks stale.',
+  'job-poll': "Fetches the latest blogs, Bluesky posts and podcasts and queues any new items. Free (just HTTP). The paid AI extraction runs later in the queue and is what checks the budget — so over budget, polling 'succeeds' but no tips appear. Dedupes by content hash; safe to repeat.",
+  'job-backfill': 'One-off cleanup that fills the short/swing/hold label and target horizon on old tips missing it, up to 500 per click. Zero cost, deterministic. If the result says more:true, click again for the next 500. Safe to repeat.',
+  'job-sync': 'Pushes up to 100 active, never-synced subscribers to beehiiv and stamps each on success. Free and budget-immune — works even at 100% of the AI cap. Already-synced rows are skipped; click again for more than 100 pending.',
+  'job-weekly': 'Generates this week’s digest content (an LLM step — uses budget) and stores it. Run this BEFORE "Publish digest draft", which only publishes an already-generated digest. Idempotent on the week.',
+  'job-publish': "Takes the already-generated weekly digest, re-runs the compliance check, and creates a beehiiv DRAFT for human review — it never emails anyone. Returns no_draft if the weekly digest hasn't been generated yet (run 'Generate weekly digest' first). Idempotent on week.",
+  'jobs-output': 'Shows the raw response of whichever button you last clicked, or an error. The dashboard numbers above do not refresh from this — a job can succeed here while the chart and leaderboard look unchanged until you reload.',
+  // reputation
+  'rep-sharers': 'Top sharers ranked by their 90-day confidence-adjusted score, best first. Each row shows name, optional tier badge, a score bar and a lifetime tip count. Top 8 only — "Full board" opens the complete leaderboard.',
+  'rep-wilson': 'Ordered by the cautious lower edge of each sharer’s 90-day success-rate confidence interval, not their raw rate. The bound shrinks hard on small samples, so a 5/5 streak scores lower than a long, slightly-less-perfect record — by design, to resist lucky streaks.',
+  'rep-tier': "'established' once a sharer has 20+ settled tips in that dimension, else 'provisional'. Every established sharer ranks above every provisional one, ties broken by the Wilson score — so a small perfect sample can never top a long real record.",
+  'shares-section': 'The most-tipped tickers by tip volume, top 10. The bar is sized relative to the most-tipped name. Shows which names sharers talk about most — not which performed best.',
+  'shares-alpha': "Average excess return over benchmark across this ticker's positions (green positive, red negative). Averaged over all sharers who tipped it, so a high-volume name can still show weak alpha. Dash when no positions have settled.",
+  'rep-leaderboard': "Full ranking tables, one per scoring method (dimension). Each shows rank, sharer, settled tips, hit rate, alpha and the confidence score. Shows 'reputation accrues as tips settle' when nothing is rated yet.",
+  'rep-col-tips': 'Count of SETTLED tips backing this score in this dimension (not the lifetime count on the bar list). This is what determines whether a sharer crosses the 20-tip "established" threshold.',
+  'rep-col-hit': 'Percent of settled calls that beat the market — the plain, uncautioned success rate. Compare with Score to see how much a thin track record is being discounted.',
+  'rep-col-alpha': 'Average margin by which calls beat the benchmark, in percent. Hit rate tells you how OFTEN they win; Alpha tells you how BIG the wins or losses are.',
+  'rep-col-score': "The confidence-adjusted 0–100 trust score (Wilson lower bound) used to rank the table. Always at or below Hit; when much lower, the sharer simply hasn't settled enough tips to trust the high hit rate yet.",
+  'dim:horizon:30': 'Ranking that judges each tip 30 days after it was made.',
+  'dim:horizon:90': 'Ranking that judges each tip 90 days after it was made. The bar list and the trade-approval table both key off this dimension.',
+  'dim:horizon:365': 'Ranking that judges each tip 365 days after it was made — the strongest long-term signal, but the slowest to fill.',
+  'dim:primary': "Judges each tip at the timeframe the sharer intended (the settled window nearest its stated horizon). Tips whose intended window hasn't settled are skipped. The fairest single ranking.",
+  'dim:conviction:90': 'A 90-day ranking where higher-conviction tips count for more (high=3, medium=2, low=1) in Hit and Alpha. The Score stays on the raw unweighted sample, so labelling everything high-conviction cannot manufacture statistical confidence.',
+  // activity
+  'activity-feed': "The 7 most recent ops events, newest first, with errors in red. This is the only in-UI place to read error detail — check it when 'Needs attention' flags Errors.",
+  // approvals / trading
+  'appr-live': 'Real-money buys that passed eligibility and the 0.5 minimum-confidence bar and now await your decision. US-only long (buy) calls. Approve places the order (real money in LIVE mode); Reject leaves the call as paper-only.',
+  'appr-failed': "Real orders that were attempted but didn't go through, with the reason. Retry-on-approve isn't built yet — a failed intent stays as paper and can only be dismissed. No money is at risk while it sits here.",
+  'appr-review': "Tips whose security couldn't be auto-identified; they have no position and aren't in the money path until resolved. The resolve/add-alias workbench is not built yet (Slice 2) — this is a count only for now.",
+  'trade-killswitch': 'Master on/off for ALL real trading. Re-checked per item, so it halts an in-progress sweep too. Fails closed — unreadable KV behaves as paused. The emergency stop: pausing prevents any real order regardless of mode or approvals.',
+  'trade-mode': 'Sets the broker connection via a KV override (no redeploy). Off: never call Alpaca. Paper: simulated orders. Live: real orders (needs a funded account + live keys, else they fail as not_configured). Each is confirm-gated.',
+  'exp-pending': "Proposed real trades awaiting your approve/reject decision — potential real spend that hasn't happened yet. Same population as the red awaiting-approval pill on the overview.",
+  'exp-approved': "Trades you've approved that haven't been placed yet. They execute on Approve and on the sweeps; a non-zero value usually means mid-sweep, cap-deferred, or halted by the kill-switch.",
+  'exp-realpos': 'Lifetime count of positions ever placed with real broker money, open and closed. A position flips from paper to real only after a buy succeeds, so this only ever grows — it is not current exposure.',
+  'exp-openreal': 'Real money currently tied up in open positions, against the live ceiling. A new order is deferred if it would push open exposure over the cap. This is your real money-at-risk figure right now.',
+  'exp-orders': 'Real orders executed today versus the daily limit, plus the per-order cap. Once the daily count is reached, further approved trades defer until tomorrow. Both caps fail closed to a conservative default, never unlimited.',
+  'trade-realtable': 'Ledger of actual broker positions (latest 20): ticker, Alpaca order id, buy status, position status and notional. The audit trail of real money deployed — use it to confirm orders landed at the broker.',
+};
+
+/** Focusable info icon that opens a floating tooltip (positioned by shell() script). */
+const tip = (key: string): string => {
+  const t = TIP[key];
+  if (!t) return '';
+  return `<span class="tip" tabindex="0" role="note" aria-label="${escapeHtml(t)}" data-tip="${escapeHtml(t)}">${icon('info', 13)}</span>`;
+};
 
 /** Shared rail nav across views; `active` highlights the current one. */
 function railNav(active: string): string {
@@ -175,12 +253,58 @@ ${BRAND_HEAD}
   .feed .ic { width: 32px; height: 32px; border-radius: 9px; background: rgba(255,255,255,.07); display: grid; place-items: center; color: rgba(255,255,255,.8); }
   .ring-wrap { display: flex; align-items: center; gap: 22px; }
   .actions { display: flex; gap: 8px; flex-wrap: wrap; align-items: center; }
+  .jobwrap { display: inline-flex; align-items: center; gap: 3px; }
   button { font: inherit; font-weight: 600; padding: 9px 16px; border: none; border-radius: var(--r-pill); background: var(--ink); color: var(--on-dark); cursor: pointer; }
   button.ghost { background: var(--card); color: var(--text); border: 1px solid var(--line); }
   button:hover { opacity: .9; } button:disabled { opacity: .5; }
   pre#out { font-family: var(--font-mono); font-size: 12px; background: var(--paper-2); border: 1px solid var(--line); border-radius: var(--r-md); padding: 11px; white-space: pre-wrap; word-break: break-word; min-height: 1rem; color: var(--text-2); }
   kbd { font-family: var(--font-mono); font-size: 10px; border: 1px solid var(--line); border-radius: 4px; padding: 2px 6px; color: var(--muted); }
-</style></head><body>${body}</body></html>`;
+  /* help: info icon + floating tooltip */
+  .tip { display: inline-flex; align-items: center; vertical-align: middle; margin-left: 5px; color: var(--faint); cursor: help; }
+  .tip:hover, .tip:focus { color: var(--muted); outline: none; }
+  .card.dark .tip, .hero .tip { color: rgba(255,255,255,.45); }
+  .card.dark .tip:hover, .hero .tip:hover, .card.dark .tip:focus, .hero .tip:focus { color: rgba(255,255,255,.8); }
+  .tip-pop { position: fixed; z-index: 60; display: none; max-width: 300px; background: var(--ink); color: var(--on-dark); font-family: var(--font-body); font-size: 12px; font-weight: 400; line-height: 1.5; text-transform: none; letter-spacing: normal; padding: 10px 12px; border-radius: var(--r-md); box-shadow: var(--shadow-lg); pointer-events: none; }
+  /* walkthrough */
+  .walk { background: var(--card); border: 1px solid var(--line); border-radius: var(--r-lg); box-shadow: var(--shadow-sm); padding: 4px 20px; }
+  .walk > summary { list-style: none; cursor: pointer; display: flex; align-items: center; gap: 10px; padding: 14px 0; font-family: var(--font-display); font-weight: 400; text-transform: uppercase; letter-spacing: .02em; font-size: 14px; }
+  .walk > summary::-webkit-details-marker { display: none; }
+  .walk > summary .chev { margin-left: auto; color: var(--faint); transition: transform .15s; }
+  .walk[open] > summary .chev { transform: rotate(90deg); }
+  .walk > summary span.sub { font-family: var(--font-body); text-transform: none; letter-spacing: normal; font-size: 12px; font-weight: 400; color: var(--muted); }
+  .walk .wbody { padding: 0 0 18px; }
+  .walk .wbody > p { margin: 0 0 12px; font-size: 13px; color: var(--text-2); max-width: 70ch; }
+  .walk ol { margin: 0; padding-left: 0; counter-reset: step; list-style: none; display: grid; gap: 8px; }
+  .walk ol li { counter-increment: step; position: relative; padding-left: 34px; font-size: 13px; color: var(--text-2); line-height: 1.5; }
+  .walk ol li::before { content: counter(step); position: absolute; left: 0; top: -1px; width: 22px; height: 22px; border-radius: 50%; background: var(--ink); color: var(--on-dark); font-family: var(--font-mono); font-size: 11px; display: grid; place-items: center; }
+  /* clickable triage cards */
+  a.ti { text-decoration: none; color: inherit; transition: border-color .12s, transform .12s; }
+  a.ti:hover { border-color: var(--muted); transform: translateY(-1px); }
+  a.ti:hover .go { color: var(--text); }
+</style></head><body>${body}
+<div class="tip-pop" id="tip-pop"></div>
+<script>
+  (function(){
+    var pop = document.getElementById('tip-pop');
+    function show(el){
+      var t = el.getAttribute('data-tip'); if(!t) return;
+      pop.textContent = t; pop.style.display = 'block';
+      var r = el.getBoundingClientRect();
+      var w = pop.offsetWidth, h = pop.offsetHeight, m = 10;
+      var left = Math.min(Math.max(m, r.left - 4), window.innerWidth - w - m);
+      var top = r.bottom + 8;
+      if (top + h > window.innerHeight - m) top = Math.max(m, r.top - h - 8);
+      pop.style.left = left + 'px'; pop.style.top = top + 'px';
+    }
+    function hide(){ pop.style.display = 'none'; }
+    document.addEventListener('mouseover', function(e){ var el = e.target.closest && e.target.closest('.tip'); if(el) show(el); });
+    document.addEventListener('mouseout', function(e){ var el = e.target.closest && e.target.closest('.tip'); if(el) hide(); });
+    document.addEventListener('focusin', function(e){ var el = e.target.closest && e.target.closest('.tip'); if(el) show(el); });
+    document.addEventListener('focusout', function(e){ var el = e.target.closest && e.target.closest('.tip'); if(el) hide(); });
+    window.addEventListener('scroll', hide, true);
+  })();
+</script>
+</body></html>`;
   return new Response(html, { headers: { 'content-type': 'text/html; charset=utf-8', 'cache-control': 'no-store' } });
 }
 
@@ -240,21 +364,25 @@ function navChart(values: number[], w = 720, h = 200): string {
   </svg>`;
 }
 
-/** Donut ring with a centre percentage. */
-function ring(frac: number, label: string, size = 124, stroke = 11): string {
+/** Donut ring with a centre percentage. `frac` null ⇒ no-data dash (distinct from a genuine 0%). */
+function ring(frac: number | null, label: string, size = 124, stroke = 11): string {
   const r = (size - stroke) / 2, c = 2 * Math.PI * r;
+  const f = frac ?? 0;
+  const centre = frac == null ? '–' : `${Math.round(f * 100)}%`;
   return `<div style="position:relative;width:${size}px;height:${size}px;flex-shrink:0">
     <svg width="${size}" height="${size}"><circle cx="${size / 2}" cy="${size / 2}" r="${r}" fill="none" stroke="var(--line)" stroke-width="${stroke}"/>
-    <circle cx="${size / 2}" cy="${size / 2}" r="${r}" fill="none" stroke="var(--ink)" stroke-width="${stroke}" stroke-linecap="round" stroke-dasharray="${(frac * c).toFixed(1)} ${c.toFixed(1)}" transform="rotate(-90 ${size / 2} ${size / 2})"/></svg>
+    <circle cx="${size / 2}" cy="${size / 2}" r="${r}" fill="none" stroke="var(--ink)" stroke-width="${stroke}" stroke-linecap="round" stroke-dasharray="${(f * c).toFixed(1)} ${c.toFixed(1)}" transform="rotate(-90 ${size / 2} ${size / 2})"/></svg>
     <div style="position:absolute;inset:0;display:flex;flex-direction:column;align-items:center;justify-content:center">
-      <div class="display" style="font-size:26px">${Math.round(frac * 100)}%</div>
+      <div class="display" style="font-size:26px">${centre}</div>
       <div class="mono muted" style="font-size:9px;text-transform:uppercase;letter-spacing:.08em">${escapeHtml(label)}</div></div></div>`;
 }
 
 export async function adminDashboard(env: Env): Promise<Response> {
   const cap = Number(env.MAX_DAILY_COST_CENTS) || 0;
   const spent = await spentTodayCents(env).catch(() => 0);
-  const spentPct = cap > 0 ? Math.min(100, Math.round((spent / cap) * 100)) : 0;
+  // True percent (can exceed 100 — withinBudget gates on estimate, recordSpend records actual).
+  const spentPct = cap > 0 ? Math.round((spent / cap) * 100) : 0;
+  const spendLabel = `${spentPct}% of cap${spentPct > 100 ? ' · over' : ''}`;
 
   const [tipsAgg] = await rows<{ total: number; resolved: number }>(env, `SELECT COUNT(*) total, SUM(CASE WHEN security_id IS NOT NULL THEN 1 ELSE 0 END) resolved FROM tips`);
   const [posAgg] = await rows<{ open: number; closed: number }>(env, `SELECT SUM(status='open') open, SUM(status='closed') closed FROM positions`);
@@ -291,14 +419,14 @@ export async function adminDashboard(env: Env): Promise<Response> {
   const sign = (frac: number | null | undefined) => frac == null ? '<td class="num muted">–</td>' : `<td class="num ${frac >= 0 ? 'pos' : 'neg'}">${pct(frac)}</td>`;
   const DIM: Record<string, string> = { 'horizon:30': '30-day', 'horizon:90': '90-day', 'horizon:365': '365-day', primary: 'Primary horizon', 'conviction:90': 'Conviction-weighted' };
 
-  // Needs-attention triage (operational).
+  // Needs-attention triage (operational). Each item links to where the operator resolves it.
   const triage = [
-    err24?.n ? { sev: 'high', kind: 'Errors', t: `${err24.n} error event${err24.n === 1 ? '' : 's'} in 24h`, d: 'Check the activity feed / ops_events' } : null,
-    spentPct >= 90 ? { sev: 'high', kind: 'Budget', t: `LLM spend at ${spentPct}% of cap`, d: 'Extraction will defer until the daily reset (00:00 UTC)' } : null,
-    reviewTips?.n ? { sev: 'med', kind: 'Review', t: `${reviewTips.n} tip${reviewTips.n === 1 ? '' : 's'} need review`, d: 'Unresolved security — no position opened' } : null,
-    pendPos?.n ? { sev: 'med', kind: 'Pipeline', t: `${pendPos.n} resolved tip${pendPos.n === 1 ? '' : 's'} awaiting a position`, d: 'Run the daily pass to open + value them' } : null,
-    unsynced?.n ? { sev: 'low', kind: 'Newsletter', t: `${unsynced.n} subscriber${unsynced.n === 1 ? '' : 's'} not synced to beehiiv`, d: 'Runs in the daily cron, or sync now' } : null,
-  ].filter(Boolean) as Array<{ sev: string; kind: string; t: string; d: string }>;
+    err24?.n ? { sev: 'high', kind: 'Errors', t: `${err24.n} error event${err24.n === 1 ? '' : 's'} in 24h`, d: 'Open the Live activity feed below to read them', href: '#activity' } : null,
+    spentPct >= 90 ? { sev: 'high', kind: 'Budget', t: `LLM spend at ${spentPct}% of cap`, d: 'AI extraction defers until the daily reset (00:00 UTC)', href: '#jobs' } : null,
+    reviewTips?.n ? { sev: 'med', kind: 'Review', t: `${reviewTips.n} tip${reviewTips.n === 1 ? '' : 's'} need review`, d: 'Unresolved security — open the review queue (view-only for now)', href: '/admin/approvals' } : null,
+    pendPos?.n ? { sev: 'med', kind: 'Pipeline', t: `${pendPos.n} resolved tip${pendPos.n === 1 ? '' : 's'} awaiting a position`, d: 'Run the daily pass below to open + value them', href: '#jobs' } : null,
+    unsynced?.n ? { sev: 'low', kind: 'Newsletter', t: `${unsynced.n} subscriber${unsynced.n === 1 ? '' : 's'} not synced to beehiiv`, d: 'Runs in the daily cron, or sync now below', href: '#jobs' } : null,
+  ].filter(Boolean) as Array<{ sev: string; kind: string; t: string; d: string; href: string }>;
   const sevColor = (s: string) => s === 'high' ? 'var(--bad)' : s === 'med' ? '#c98a00' : 'var(--faint)';
 
   const dimGroups = ratings.reduce((acc: Record<string, typeof ratings>, r) => { (acc[r.dimension] ??= []).push(r); return acc; }, {});
@@ -317,43 +445,59 @@ export async function adminDashboard(env: Env): Promise<Response> {
       </header>
 
       <div class="content">
+        <!-- WALKTHROUGH -->
+        <details class="walk" open>
+          <summary>${icon('grid', 16)} How to use this console <span class="sub">— daily quick-start</span><span class="chev" style="font-size:18px">›</span></summary>
+          <div class="wbody">
+            <p>This console tracks public stock tips, paper-trades each outcome, and reports a confidence-adjusted sharer leaderboard — a backward-looking record only, never advice. A typical pass:</p>
+            <ol>
+              <li>Check the posture strip below — confirm the broker mode (OFF / PAPER / LIVE) and deal with any red “live trades awaiting approval” pill first.</li>
+              <li>Scan <b>Needs attention</b>: red items (Errors, Budget) before amber (Review, Pipeline) before grey (Newsletter). Each card is clickable — it jumps to where you fix it.</li>
+              <li>If errors are flagged, open the dark <b>Live activity</b> card and read the red lines for the cause.</li>
+              <li>In <b>Run a job</b>, click <b>Poll producers</b> to pull fresh tips, then <b>Run daily</b> to open/value positions and refresh the chart + leaderboard.</li>
+              <li>Approve or reject any pending real-money trades in <b>Approvals</b>, after checking ticker, notional, source and evidence.</li>
+              <li>Reload the page to see updated numbers — the metrics do not live-update after a job runs.</li>
+            </ol>
+            <p class="muted" style="margin-bottom:0;font-size:12px">Hover the ${icon('info', 12)} icons anywhere on this page for a plain-English explanation of each field.</p>
+          </div>
+        </details>
         <!-- POSTURE STRIP -->
         <div style="display:flex;align-items:center;gap:12px;flex-wrap:wrap;${brokerMode === 'live' ? 'border-top:3px solid var(--bad);padding-top:10px' : ''}">
-          ${postureBadge(brokerMode, tradingHalted)}
-          <span class="pill">LICENCE · ${env.PUBLIC_PRICES === 'on' ? 'commercial' : 'personal'}</span>
-          ${pendingLive ? `<a href="/admin/approvals" class="pill" style="background:var(--bad);color:#fff;border:none;text-decoration:none">${pendingLive} live trade${pendingLive === 1 ? '' : 's'} awaiting approval →</a>` : ''}
+          ${postureBadge(brokerMode, tradingHalted)}${tip(tradingHalted ? 'posture-paused' : 'posture-alpaca-mode')}
+          <span class="pill">LICENCE · ${env.PUBLIC_PRICES === 'on' ? 'commercial' : 'personal'}</span>${tip('posture-licence')}
+          ${pendingLive ? `<a href="/admin/approvals" class="pill" style="background:var(--bad);color:#fff;border:none;text-decoration:none">${pendingLive} live trade${pendingLive === 1 ? '' : 's'} awaiting approval →</a>${tip('posture-pending-live')}` : ''}
         </div>
         <!-- HERO -->
         <section class="hero">
           <svg class="gridbg" width="100%" height="100%"><defs><pattern id="g" width="40" height="40" patternUnits="userSpaceOnUse"><path d="M 40 0 L 0 0 0 40" fill="none" stroke="#fff" stroke-width="0.5"/></pattern></defs><rect width="100%" height="100%" fill="url(#g)"/></svg>
           <div style="position:relative;z-index:1">
-            <div class="live"><i></i> Live · ${escapeHtml(navLast?.as_of || 'awaiting first run')} · hypothetical</div>
-            <h1>A hypothetical<br>$1,000 is worth<br><em>$${navLast ? navLast.nav_index.toFixed(0) : '—'}</em> today.</h1>
-            <p class="lede">Spread equally across ${tipsAgg?.resolved ?? 0} tracked calls from ${srcAgg?.n ?? 0} sharers. ${overallHit != null ? `${Math.round(overallHit * 100)}% of settled calls beat their market benchmark.` : 'Outcomes accrue as calls settle.'} Backward-looking, paper-traded — not advice.</p>
+            <div class="live"><i></i> Live · ${escapeHtml(navLast?.as_of || 'awaiting first run')} · hypothetical${tip('hero-live-badge')}</div>
+            <h1>A hypothetical<br>$1,000 is worth<br><em>$${navLast ? navLast.nav_index.toFixed(0) : '—'}</em> today.${tip('hero-headline')}</h1>
+            <p class="lede">Spread equally across ${tipsAgg?.resolved ?? 0} tracked calls from ${srcAgg?.n ?? 0} sharers. ${overallHit != null ? `${Math.round(overallHit * 100)}% of settled calls beat their market benchmark.` : 'Outcomes accrue as calls settle.'} Backward-looking, paper-traded — not advice.${tip('hero-lede')}</p>
           </div>
           <div class="herostats">
-            <div class="herostat"><div><div class="lab">$1,000 journey</div><div class="val">${navLast ? navLast.nav_index.toFixed(0) : '–'}</div><div class="sub">indexed off $1,000</div></div>${delta(navRet)}</div>
-            <div class="herostat"><div><div class="lab">Hit rate</div><div class="val">${overallHit == null ? '–' : Math.round(overallHit * 100) + '%'}</div><div class="sub">${hitAgg?.n ?? 0} settled outcomes</div></div></div>
-            <div class="herostat"><div><div class="lab">Avg alpha</div><div class="val">${hitAgg?.alpha == null ? '–' : pct(hitAgg.alpha)}</div><div class="sub">excess vs benchmark</div></div>${delta(hitAgg?.alpha ?? null)}</div>
+            <div class="herostat"><div><div class="lab">$1,000 journey${tip('herostat-journey')}</div><div class="val">${navLast ? navLast.nav_index.toFixed(0) : '–'}</div><div class="sub">indexed off $1,000</div></div>${delta(navRet)}</div>
+            <div class="herostat"><div><div class="lab">Hit rate${tip('herostat-hitrate')}</div><div class="val">${overallHit == null ? '–' : Math.round(overallHit * 100) + '%'}</div><div class="sub">${hitAgg?.n ?? 0} settled outcomes</div></div></div>
+            <div class="herostat"><div><div class="lab">Avg alpha${tip('herostat-alpha')}</div><div class="val">${hitAgg?.alpha == null ? '–' : pct(hitAgg.alpha)}</div><div class="sub">excess vs benchmark</div></div>${delta(hitAgg?.alpha ?? null)}</div>
           </div>
         </section>
 
         <!-- META STRIP -->
         <div style="display:flex;gap:26px;flex-wrap:wrap;font-size:13px;color:var(--muted);padding:0 2px">
-          <span><b style="color:var(--text);font-family:var(--font-mono)">${secAgg?.n ?? 0}</b> shares followed</span>
-          <span><b style="color:var(--text);font-family:var(--font-mono)">${(posAgg?.open ?? 0) + (posAgg?.closed ?? 0)}</b> positions · ${posAgg?.open ?? 0} open</span>
-          <span><b style="color:var(--text);font-family:var(--font-mono)">${tipsAgg?.total ?? 0}</b> tips · ${tipsAgg?.resolved ?? 0} resolved</span>
-          <span><b style="color:var(--text);font-family:var(--font-mono)">${subAgg?.total ?? 0}</b> subscribers · ${subAgg?.synced ?? 0} synced</span>
+          <span><b style="color:var(--text);font-family:var(--font-mono)">${secAgg?.n ?? 0}</b> shares followed${tip('meta-shares')}</span>
+          <span><b style="color:var(--text);font-family:var(--font-mono)">${(posAgg?.open ?? 0) + (posAgg?.closed ?? 0)}</b> positions · ${posAgg?.open ?? 0} open${tip('meta-positions')}</span>
+          <span><b style="color:var(--text);font-family:var(--font-mono)">${tipsAgg?.total ?? 0}</b> tips · ${tipsAgg?.resolved ?? 0} resolved${tip('meta-tips')}</span>
+          <span><b style="color:var(--text);font-family:var(--font-mono)">${subAgg?.total ?? 0}</b> subscribers · ${subAgg?.synced ?? 0} synced${tip('meta-subscribers')}</span>
         </div>
 
         <!-- TREND + RING -->
         <div class="row r-trend">
-          <section class="card"><header><div><h3>The $1,000 journey</h3><p class="csub">Equal-weighted across every tracked call · indexed off $1,000</p></div>
+          <section class="card"><header><div><h3>The $1,000 journey${tip('trend-chart')}</h3><p class="csub">Equal-weighted across every tracked call · indexed off $1,000</p></div>
             <div class="bignum">${navLast ? navLast.nav_index.toFixed(0) : '–'}</div></header>
             <div class="body">${navChart(navSeries.map((n) => n.nav_index))}</div></section>
-          <section class="card"><header><div><h3>Hit rate</h3><p class="csub">Calls that beat the market, by horizon</p></div></header>
+          <section class="card"><header><div><h3>Hit rate${tip('ring-hitrate')}</h3><p class="csub">Calls that beat the market, by horizon${tip('ring-horizon')}</p></div></header>
             <div class="body ring-wrap">
-              ${ring(overallHit ?? 0, 'overall')}
+              ${ring(overallHit, 'overall')}
               <div style="flex:1;display:flex;flex-direction:column;gap:9px">
                 ${horizons.length === 0 ? '<span class="muted">No settled horizons yet.</span>' : horizons.map((h) => {
                   const hr = h.n ? h.hits / h.n : 0;
@@ -364,16 +508,16 @@ export async function adminDashboard(env: Env): Promise<Response> {
         </div>
 
         <!-- NEEDS ATTENTION -->
-        <section class="card"><header><div><h3>Needs attention</h3><p class="csub">Operational items, sorted by severity</p></div></header>
+        <section class="card"><header><div><h3>Needs attention${tip('triage-section')}</h3><p class="csub">Operational items, sorted by severity — click any card to resolve it</p></div></header>
           <div class="body">${triage.length === 0 ? '<p class="muted">All clear — nothing needs attention. ✓</p>' :
-            `<div class="triage">${triage.map((it) => `<div class="ti"><div class="accent" style="background:${sevColor(it.sev)}"></div>
+            `<div class="triage">${triage.map((it) => `<a class="ti" href="${escapeHtml(it.href)}"><div class="accent" style="background:${sevColor(it.sev)}"></div>
               <div class="mid"><div style="display:flex;align-items:center;gap:8px;margin-bottom:3px"><span class="sev" style="color:${sevColor(it.sev)};background:color-mix(in srgb, ${sevColor(it.sev)} 14%, transparent)">${it.sev}</span><span class="mono muted" style="font-size:10px;text-transform:uppercase;letter-spacing:.06em">${escapeHtml(it.kind)}</span></div>
               <div style="font-size:13px;font-weight:600">${escapeHtml(it.t)}</div><div style="font-size:12px;color:var(--muted)">${escapeHtml(it.d)}</div></div>
-              <span style="padding-right:14px;color:var(--faint)">›</span></div>`).join('')}</div>`}</div></section>
+              <span class="go" style="padding-right:14px;color:var(--faint)">›</span></a>`).join('')}</div>`}</div></section>
 
         <!-- SHARERS + SHARES -->
         <div class="row r-half" id="sharers">
-          <section class="card"><header><div><h3>Tip sharers · reputation</h3><p class="csub">Ranked by 90-day Wilson lower bound</p></div><a href="/leaderboard" class="mono muted" style="font-size:12px">Full board →</a></header>
+          <section class="card"><header><div><h3>Tip sharers · reputation${tip('rep-sharers')}</h3><p class="csub">Ranked by 90-day Wilson lower bound${tip('rep-wilson')}</p></div><a href="/leaderboard" class="mono muted" style="font-size:12px">Full board →</a></header>
             <div class="body barlist">${sharers.length === 0 ? '<p class="muted">No sharers yet.</p>' : sharers.map((s) => {
               const score = s.score_lower ?? 0;
               return `<div class="b"><span style="font-size:13px;font-weight:600;overflow:hidden;text-overflow:ellipsis">${escapeHtml(s.name)} ${s.tier ? `<span class="tier">${escapeHtml(s.tier)}</span>` : ''}</span>
@@ -381,7 +525,7 @@ export async function adminDashboard(env: Env): Promise<Response> {
                 <span class="num" style="font-size:12px">${s.score_lower == null ? '–' : `<b>${score.toFixed(0)}</b>`}</span>
                 <span class="num muted" style="font-size:11px">${s.tips} tip${s.tips === 1 ? '' : 's'}</span></div>`;
             }).join('')}</div></section>
-          <section class="card" id="shares"><header><div><h3>Shares we follow</h3><p class="csub">By tip volume</p></div></header>
+          <section class="card" id="shares"><header><div><h3>Shares we follow${tip('shares-section')}</h3><p class="csub">By tip volume · last column is alpha vs benchmark${tip('shares-alpha')}</p></div></header>
             <div class="body barlist">${shares.length === 0 ? '<p class="muted">No tracked shares yet.</p>' : shares.map((s) => `<div class="b" style="grid-template-columns:120px 1fr 54px 56px">
               <span style="font-size:13px"><b>${escapeHtml(s.ticker)}</b></span>
               <div class="track"><span style="width:${(s.tips / maxTips) * 100}%"></span></div>
@@ -391,41 +535,33 @@ export async function adminDashboard(env: Env): Promise<Response> {
 
         <!-- REPUTATION BY DIMENSION + ACTIVITY -->
         <div class="row r-half" id="activity">
-          <section class="card"><header><div><h3>Reputation leaderboard</h3><p class="csub">Every dimension — horizon-keyed &amp; conviction-weighted</p></div></header>
+          <section class="card"><header><div><h3>Reputation leaderboard${tip('rep-leaderboard')}</h3><p class="csub">Every dimension — horizon-keyed &amp; conviction-weighted · tiers gate ranking${tip('rep-tier')}</p></div></header>
             <div class="body">${Object.keys(dimGroups).length === 0 ? '<p class="muted">No rated sources yet — reputation accrues as tips settle.</p>' :
-              Object.entries(dimGroups).map(([dim, rs]) => `<div style="margin-bottom:14px"><div class="pill" style="margin-bottom:6px">${escapeHtml(DIM[dim] || dim)}</div>
-                <table><thead><tr><th>#</th><th>Sharer</th><th class="num">Tips</th><th class="num">Hit</th><th class="num">Alpha</th><th class="num">Score</th></tr></thead><tbody>
+              Object.entries(dimGroups).map(([dim, rs]) => `<div style="margin-bottom:14px"><span class="pill" style="margin-bottom:6px;display:inline-block">${escapeHtml(DIM[dim] || dim)}</span>${tip('dim:' + dim)}
+                <table><thead><tr><th>#</th><th>Sharer</th><th class="num">Tips${tip('rep-col-tips')}</th><th class="num">Hit${tip('rep-col-hit')}</th><th class="num">Alpha${tip('rep-col-alpha')}</th><th class="num">Score${tip('rep-col-score')}</th></tr></thead><tbody>
                 ${rs.map((r) => `<tr><td class="num">${r.rank}</td><td>${escapeHtml(r.source_name)}</td><td class="num">${r.n_tips}</td><td class="num">${Math.round(r.hit_rate * 100)}%</td>${sign(r.avg_excess_pct)}<td class="num"><b>${r.score_lower.toFixed(0)}</b></td></tr>`).join('')}
                 </tbody></table></div>`).join('')}</div></section>
-          <section class="card dark"><header><div><h3>Live activity</h3><p class="csub">Recent ops events</p></div><span style="display:inline-flex;align-items:center;gap:6px;font-size:11px;color:rgba(255,255,255,.6)"><span style="width:6px;height:6px;border-radius:50%;background:#5bbb6b;box-shadow:0 0 0 3px rgba(91,187,107,.18)"></span>Live</span></header>
+          <section class="card dark"><header><div><h3>Live activity${tip('activity-feed')}</h3><p class="csub">Recent ops events</p></div><span style="display:inline-flex;align-items:center;gap:6px;font-size:11px;color:rgba(255,255,255,.6)"><span style="width:6px;height:6px;border-radius:50%;background:#5bbb6b;box-shadow:0 0 0 3px rgba(91,187,107,.18)"></span>Live</span></header>
             <div class="body feed">${ops.map((o) => `<div class="f"><div class="ic">${icon('pulse', 14)}</div>
               <div style="min-width:0"><div style="font-size:13px;${o.kind === 'error' ? 'color:var(--bad-soft)' : ''}">${escapeHtml(o.kind)}</div><div class="mono" style="font-size:11px;color:rgba(255,255,255,.45);overflow:hidden;text-overflow:ellipsis;white-space:nowrap">${escapeHtml(o.detail || '')}</div></div>
               <span class="mono" style="font-size:10px;color:rgba(255,255,255,.45)">${escapeHtml(o.created_at.slice(11, 16))}</span></div>`).join('')}</div></section>
         </div>
 
         <!-- JOBS -->
-        <section class="card" id="newsletter"><header><div><h3>Run a job</h3><p class="csub">Spend today: $${(spent / 100).toFixed(2)} / $${(cap / 100).toFixed(0)} · ${spentPct}% of cap</p></div></header>
+        <section class="card" id="jobs"><header><div><h3>Run a job${tip('jobs-section')}</h3><p class="csub">Spend today: $${(spent / 100).toFixed(2)} / $${(cap / 100).toFixed(0)} · ${spendLabel}${tip('jobs-spend')}</p></div></header>
           <div class="body"><div class="actions">
-            <button data-act="/admin/run-daily">Run daily</button>
-            <button data-act="/admin/poll" class="ghost">Poll producers</button>
-            <button data-act="/admin/backfill-tip-type?limit=500" class="ghost">Backfill tip types</button>
-            <button data-act="/admin/sync-subscribers" class="ghost">Sync subscribers</button>
-            <button data-act="/admin/publish-digest" class="ghost">Publish digest draft</button>
-          </div><pre id="out" class="muted" style="margin-top:12px">Action results appear here · refresh to see updated metrics.</pre></div></section>
+            <span class="jobwrap"><button data-act="/admin/run-daily">Run daily</button>${tip('job-run-daily')}</span>
+            <span class="jobwrap"><button data-act="/admin/poll" class="ghost">Poll producers</button>${tip('job-poll')}</span>
+            <span class="jobwrap"><button data-act="/admin/backfill-tip-type?limit=500" class="ghost">Backfill tip types</button>${tip('job-backfill')}</span>
+            <span class="jobwrap"><button data-act="/admin/sync-subscribers" class="ghost">Sync subscribers</button>${tip('job-sync')}</span>
+            <span class="jobwrap"><button data-act="/admin/run-weekly" class="ghost">Generate weekly digest</button>${tip('job-weekly')}</span>
+            <span class="jobwrap"><button data-act="/admin/publish-digest" class="ghost">Publish digest draft</button>${tip('job-publish')}</span>
+          </div>
+          <p class="muted" style="font-size:12px;margin:12px 0 0">Tip extraction and digest drafting cost AI budget and defer when over cap; polling, backfill and sync are free. Polling only queues items — new tips appear after the queue extracts them.${tip('jobs-output')}</p>
+          <pre id="out" class="muted" style="margin-top:10px">Action results appear here · reload the page to see updated metrics.</pre></div></section>
       </div>
     </div>
-  </div>
-  <script>
-    document.querySelectorAll('button[data-act]').forEach(function (b) {
-      b.addEventListener('click', function () {
-        var out = document.getElementById('out');
-        out.textContent = b.textContent.trim() + '… running'; b.disabled = true;
-        fetch(b.getAttribute('data-act'), { method: 'POST' }).then(function (r) { return r.text(); })
-          .then(function (t) { out.textContent = t; b.disabled = false; })
-          .catch(function (e) { out.textContent = 'Error: ' + e; b.disabled = false; });
-      });
-    });
-  </script>`;
+  </div>${ACTION_SCRIPT}`;
   return shell('Dashboard', body);
 }
 
@@ -440,18 +576,18 @@ export async function adminApprovals(env: Env): Promise<Response> {
   const body = `<div class="app">${railNav('approvals')}<div class="main">
     <header class="topbar"><div class="search">${icon('inbox', 15)}<span>Approvals — what needs you</span></div><button onclick="location.reload()">↻ Refresh</button></header>
     <div class="content">
-      <h2 style="margin-top:0">Live trades awaiting approval ${live.length ? `<span class="pill" style="background:var(--bad);color:#fff;border:none">${live.length}</span>` : ''}</h2>
+      <h2 style="margin-top:0">Live trades awaiting approval ${live.length ? `<span class="pill" style="background:var(--bad);color:#fff;border:none">${live.length}</span>` : ''}${tip('appr-live')}</h2>
       <div class="panel">${liveTradeTable(live)}</div>
       <pre id="out" class="muted">Approve places a real (capped) Alpaca order via the single execute path. Reject leaves the call as a paper-only scoring record.</pre>
 
-      ${failed.length ? `<h2>Failed real buys (retryable) <span class="pill">${failed.length}</span></h2>
+      ${failed.length ? `<h2>Failed real buys (retryable) <span class="pill">${failed.length}</span>${tip('appr-failed')}</h2>
       <div class="panel"><table><thead><tr><th>Ticker</th><th>Reason</th><th></th></tr></thead><tbody>
       ${failed.map((f) => `<tr><td><b>${escapeHtml(f.ticker)}</b></td><td class="muted">${escapeHtml(f.reason || '')}</td>
         <td><button data-act="/admin/reject-trade?tip=${encodeURIComponent(f.tip_id)}" class="ghost">Dismiss</button></td></tr>`).join('')}
       </tbody></table><p class="muted" style="font-size:.78rem">Retry-on-approve and re-propose ship in a later slice; for now a failed intent stays as paper and can be dismissed.</p></div>` : ''}
 
-      <h2>Tip review queue <span class="pill">${reviewTips}</span></h2>
-      <div class="panel"><p class="muted">${reviewTips} unresolved tip(s) (abstained security). The resolve / add-alias / dismiss workbench is Slice 2.</p></div>
+      <h2>Tip review queue <span class="pill">${reviewTips}</span>${tip('appr-review')}</h2>
+      <div class="panel"><p class="muted">${reviewTips} unresolved tip(s) (abstained security). View-only for now — the resolve / add-alias / dismiss workbench is Slice 2.</p></div>
     </div>${ACTION_SCRIPT}</div></div>`;
   return shell('Approvals', body);
 }
@@ -478,7 +614,7 @@ export async function adminTrading(env: Env): Promise<Response> {
       WHERE p.mode='real' ORDER BY p.entry_at DESC LIMIT 20`,
   ).all<{ ticker: string; broker_order_id: string | null; real_buy_status: string | null; status: string; notional_cents: number | null }>()).results ?? [];
 
-  const card = (k: string, v: string, sub = '') => `<div class="card"><div class="k">${k}</div><div class="v">${v}</div>${sub ? `<div class="sub">${sub}</div>` : ''}</div>`;
+  const card = (k: string, v: string, sub = '', tipKey = '') => `<div class="card"><div class="k">${k}${tipKey ? tip(tipKey) : ''}</div><div class="v">${v}</div>${sub ? `<div class="sub">${sub}</div>` : ''}</div>`;
   const body = `<div class="app">${railNav('trading')}<div class="main">
     <header class="topbar"><div class="search">${icon('coins', 15)}<span>Trading — brokerage posture &amp; live exposure</span></div>
       <div>${postureBadge(mode, paused)}</div></header>
@@ -488,9 +624,9 @@ export async function adminTrading(env: Env): Promise<Response> {
       <h2 style="margin-top:0">Controls</h2>
       <div class="panel"><div class="actions">
         ${paused
-          ? `<button data-act="/admin/trading-resume" data-confirm="Resume live trading?">▶ Resume trading</button>`
-          : `<button data-act="/admin/trading-pause" data-confirm="Pause ALL real trading (kill-switch)?">⛔ Pause trading</button>`}
-        <span class="muted" style="margin:0 .4rem">Mode:</span>
+          ? `<span class="jobwrap"><button data-act="/admin/trading-resume" data-confirm="Resume live trading?">▶ Resume trading</button>${tip('trade-killswitch')}</span>`
+          : `<span class="jobwrap"><button data-act="/admin/trading-pause" data-confirm="Pause ALL real trading (kill-switch)?">⛔ Pause trading</button>${tip('trade-killswitch')}</span>`}
+        <span class="muted" style="margin:0 .4rem">Mode:${tip('trade-mode')}</span>
         <button class="ghost" data-act="/admin/set-alpaca-mode?mode=off" data-confirm="Set broker mode to OFF (no orders)?">Off</button>
         <button class="ghost" data-act="/admin/set-alpaca-mode?mode=paper" data-confirm="Set broker mode to PAPER (simulated)?">Paper</button>
         <button data-act="/admin/set-alpaca-mode?mode=live" data-confirm="Set broker mode to LIVE — real money on every APPROVED trade. Continue?">Live</button>
@@ -498,17 +634,17 @@ export async function adminTrading(env: Env): Promise<Response> {
 
       <h2>Exposure</h2>
       <div class="grid stats">
-        ${card('Pending approval', String(live.length), live.length ? '<a href="/admin/approvals">review queue →</a>' : 'none')}
-        ${card('Approved · awaiting exec', String(awaitingExec), awaitingExec ? 'sweeping (or cap-deferred)' : 'none')}
-        ${card('Real positions', String(realCount), 'open + closed')}
-        ${card('Open real exposure', `$${(openNotional / 100).toFixed(0)}`, `live cap $${(maxOpenCents / 100).toFixed(0)}`)}
-        ${card('Orders today', `${ordersToday}<small>/${maxDaily}</small>`, `per-order cap $${MAX_NOTIONAL_USD}`)}
+        ${card('Pending approval', String(live.length), live.length ? '<a href="/admin/approvals">review queue →</a>' : 'none', 'exp-pending')}
+        ${card('Approved · awaiting exec', String(awaitingExec), awaitingExec ? 'sweeping (or cap-deferred)' : 'none', 'exp-approved')}
+        ${card('Real positions', String(realCount), 'open + closed', 'exp-realpos')}
+        ${card('Open real exposure', `$${(openNotional / 100).toFixed(0)}`, `live cap $${(maxOpenCents / 100).toFixed(0)}`, 'exp-openreal')}
+        ${card('Orders today', `${ordersToday}<small>/${maxDaily}</small>`, `per-order cap $${MAX_NOTIONAL_USD}`, 'exp-orders')}
       </div>
 
-      <h2>Pending live trades</h2>
+      <h2>Pending live trades${tip('appr-live')}</h2>
       <div class="panel">${liveTradeTable(live)}</div>
 
-      <h2>Real positions</h2>
+      <h2>Real positions${tip('trade-realtable')}</h2>
       <div class="panel">${real.length === 0 ? '<p class="muted">No real (broker) positions yet.</p>' :
         `<table><thead><tr><th>Ticker</th><th>Order id</th><th>Buy status</th><th>Position</th><th class="num">Notional</th></tr></thead><tbody>
         ${real.map((p) => `<tr><td><b>${escapeHtml(p.ticker)}</b></td><td class="mono muted" style="font-size:.74rem">${escapeHtml((p.broker_order_id || '–').slice(0, 14))}</td>
