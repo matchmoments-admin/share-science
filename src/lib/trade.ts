@@ -9,7 +9,7 @@
 import type { Env } from '../types.js';
 import type { Security } from '../types.js';
 import { uid, nowISO, dateOnly, logOps } from './db.js';
-import { getEntryBar } from './prices.js';
+import { getEntryBar, EodhdAccountError } from './prices.js';
 import { submitBuy, eligibleForRealBuy, alpacaMode, tradingPaused, notionalUsd } from './alpaca.js';
 import { tradeCaps, capDecision } from './tradecaps.js';
 
@@ -50,6 +50,12 @@ export async function openPendingPositions(env: Env, limit = 50): Promise<{ open
     try {
       if (await openOne(env, tip)) opened++;
     } catch (err) {
+      // Account-level EODHD failure (over-quota/auth) hits every entry-bar lookup — stop the run
+      // instead of hammering each pending tip with the same failure.
+      if (err instanceof EodhdAccountError) {
+        await logOps(env, 'error', { at: 'openPendingPositions', err: 'market_data_unavailable', status: err.status, skipped: pending.length - opened });
+        break;
+      }
       await logOps(env, 'error', { at: 'openPendingPositions', tip: tip.id, err: String(err) });
     }
   }

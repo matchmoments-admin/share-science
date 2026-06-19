@@ -60,7 +60,9 @@ export interface ExtractResult {
 
 export async function extractTips(env: Env, text: string): Promise<ExtractResult> {
   if (!env.ANTHROPIC_API_KEY) throw new Error('ANTHROPIC_API_KEY not set');
-  const client = new Anthropic({ apiKey: env.ANTHROPIC_API_KEY });
+  // maxRetries lifts the SDK default (2) so transient 429/529 overloads self-heal in-call before the
+  // queue has to retry the whole message (which the queue still does as a backstop).
+  const client = new Anthropic({ apiKey: env.ANTHROPIC_API_KEY, maxRetries: 4 });
 
   const clipped = text.length > MAX_EXTRACT_CHARS ? text.slice(0, MAX_EXTRACT_CHARS) : text;
   const msg = await client.messages.create({

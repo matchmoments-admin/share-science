@@ -8,6 +8,7 @@ export interface Env {
   // vars
   PUBLIC_PRICES: string; // "on" | "off" — gates raw-price display (default off)
   MAX_DAILY_COST_CENTS: string; // daily LLM/transcription spend ceiling
+  EODHD_DAILY_CALL_BUDGET?: string; // soft daily cap on EODHD API calls (0/unset = no cap)
   EXTRACT_MODEL?: string; // override the extraction model (default claude-opus-4-8)
   ALPACA_MODE?: string; // "off" (default) | "paper" | "live" — gates broker execution
   ALPACA_NOTIONAL_USD?: string; // fixed $ size per real buy (default 5, hard cap $50)

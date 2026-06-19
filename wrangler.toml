@@ -22,6 +22,7 @@ routes = [
 [vars]
 PUBLIC_PRICES = "off"
 MAX_DAILY_COST_CENTS = "150"  # hard daily ceiling on ALL paid calls (extract + digest + transcribe). Tightened from 500 now that Haiku makes each extraction ~10c; over-cap defers to needs_review, never overspends.
+EODHD_DAILY_CALL_BUDGET = "5000"  # soft cap on EODHD API calls/day — far under the paid plan's 100k, far over real usage (~60/day). A valuation run defers if exceeded so a runaway can't blow the plan limit.
 EXTRACT_MODEL = "claude-haiku-4-5"  # extraction + digest model. Haiku 4.5 ($1/$5 per 1M) ≈ 5x cheaper than Opus 4.8 ($5/$25); extraction is a strict structured tool-call so quality risk is low.
 ALPACA_MODE = "paper"      # off | paper | live  — paper-api.alpaca.markets (simulated, no real money)
 ALPACA_NOTIONAL_USD = "5"  # $ per real buy (hard-capped at $50 in code)

@@ -35,6 +35,38 @@ export async function recordSpend(env: Env, costCents: number, now = Date.now())
   await env.KV.put(key, String(next), { expirationTtl: Math.ceil((2 * DAY_MS) / 1000) });
 }
 
+// ── EODHD market-data call meter ─────────────────────────────────────
+// Mirrors the spend meter but counts EODHD API *calls* (not cents) so a runaway valuation can never
+// silently blow the daily plan limit. Best-effort KV counter, reset daily, 2-day TTL.
+function eodhdDayKey(now: number): string {
+  return `eodhd:${new Date(now).toISOString().slice(0, 10)}`; // eodhd:YYYY-MM-DD
+}
+
+/** EODHD API calls made so far today (best-effort). */
+export async function eodhdCallsToday(env: Env, now = Date.now()): Promise<number> {
+  const raw = await env.KV.get(eodhdDayKey(now));
+  return raw ? Number(raw) || 0 : 0;
+}
+
+/** Record one EODHD API call. Best-effort increment with a 2-day TTL. */
+export async function recordEodhdCall(env: Env, now = Date.now()): Promise<void> {
+  const key = eodhdDayKey(now);
+  const next = (await eodhdCallsToday(env, now)) + 1;
+  await env.KV.put(key, String(next), { expirationTtl: Math.ceil((2 * DAY_MS) / 1000) });
+}
+
+/** Daily EODHD call budget (soft cap, well under the plan limit). 0/unset ⇒ no cap. */
+export function eodhdCallBudget(env: Env): number {
+  return Number(env.EODHD_DAILY_CALL_BUDGET) || 0;
+}
+
+/** True if there is headroom for at least one more EODHD call under the soft budget. */
+export async function eodhdWithinBudget(env: Env, now = Date.now()): Promise<boolean> {
+  const cap = eodhdCallBudget(env);
+  if (cap <= 0) return true; // no soft cap configured
+  return (await eodhdCallsToday(env, now)) < cap;
+}
+
 /**
  * Best-effort fixed-window rate limit on a KV counter. Returns true if the action is allowed
  * (and increments the window), false if `bucket` has already reached `max` within `windowSec`.

@@ -45,7 +45,9 @@ export async function pollRssSources(env: Env): Promise<{ feeds: number; items: 
         if (r.ok && !r.duplicate) ingested++;
       }
     } catch (err) {
-      await logOps(env, 'error', { at: 'pollRssSources', source: s.id, err: String(err) });
+      // External feed fetch/parse failure — transient and out of our control. Log as 'warn' so it
+      // doesn't inflate the HIGH "Errors" alarm; the next poll retries.
+      await logOps(env, 'warn', { at: 'pollRssSources', source: s.id, err: String(err) });
     }
     await env.DB.prepare('UPDATE sources SET last_cursor = ? WHERE id = ?').bind(new Date().toISOString(), s.id).run();
   }
@@ -79,7 +81,8 @@ async function fetchFeed(env: Env, s: RssSource): Promise<RssItem[]> {
   if (resp.status === 304) return []; // unchanged since last poll
   if (resp.status === 429 || resp.status >= 500) {
     await env.KV.put(boKey, String(Date.now() + BACKOFF_MS), { expirationTtl: Math.ceil(BACKOFF_MS / 1000) });
-    await logOps(env, 'error', { at: 'fetchFeed', source: s.id, status: resp.status, action: 'backoff_6h' });
+    // Transient feed rate-limit (429) / outage (5xx) — we back off 6h. Log as 'warn', not 'error'.
+    await logOps(env, 'warn', { at: 'fetchFeed', source: s.id, status: resp.status, action: 'backoff_6h' });
     return [];
   }
   if (!resp.ok) return []; // 4xx (e.g. 404) — skip quietly this run

@@ -8,6 +8,23 @@
  */
 import type { Env, Security } from '../types.js';
 import { dateOnly } from './db.js';
+import { recordEodhdCall } from './usage.js';
+import { adjCloseFromSeries, type AdjSeries } from './series.js';
+
+/**
+ * Account-level EODHD failure (402 over-quota / 401-403 auth) — affects EVERY symbol, so callers
+ * should short-circuit the whole run rather than retry per-symbol (which burns quota + spams errors).
+ * Distinct from a per-symbol/network error, which stays a skip-one.
+ */
+export class EodhdAccountError extends Error {
+  readonly status: number;
+  constructor(status: number) {
+    super(`EODHD account error ${status}`);
+    this.name = 'EodhdAccountError';
+    this.status = status;
+  }
+}
+const ACCOUNT_LEVEL_STATUSES = new Set([401, 402, 403]);
 
 interface EodBar {
   date: string; // YYYY-MM-DD
@@ -40,6 +57,10 @@ async function fetchEod(env: Env, symbol: string, fromISO: string, toISO: string
     `https://eodhd.com/api/eod/${encodeURIComponent(symbol)}` +
     `?api_token=${env.EODHD_API_KEY}&fmt=json&order=a&from=${dateOnly(fromISO)}&to=${dateOnly(toISO)}`;
   const resp = await fetch(url);
+  await recordEodhdCall(env); // meter every call we actually make (success or not)
+  // Account-level failures (over-quota 402, auth 401/403) hit every symbol — surface as a typed
+  // error so the caller aborts the run instead of hammering N symbols with the same failure.
+  if (ACCOUNT_LEVEL_STATUSES.has(resp.status)) throw new EodhdAccountError(resp.status);
   if (!resp.ok) throw new Error(`EODHD ${symbol} ${resp.status}`);
   const data = (await resp.json()) as EodBar[];
   return Array.isArray(data) ? data : [];
@@ -85,6 +106,23 @@ export async function getAdjCloseAsOf(env: Env, sec: Security, dateISO: string, 
 export async function getLatestAdjClose(env: Env, sec: Security, todayISO: string, cache?: PriceCache): Promise<Bar | null> {
   return getAdjCloseAsOf(env, sec, todayISO, cache);
 }
+
+/**
+ * A security's adjusted-close history over a range, fetched in ONE EODHD call and indexed by date.
+ * Use for repeated as-of lookups against the SAME security (esp. a benchmark shared across every
+ * position): build once per run, then resolve each lookup locally with `adjCloseFromSeries` — turning
+ * O(positions) EODHD calls into one. Semantics are identical to getAdjCloseAsOf (same adj factor,
+ * same "most recent trading day at/before the date" rule), just sourced from the pre-fetched bars.
+ */
+export async function getAdjCloseSeries(env: Env, sec: Security, fromISO: string, toISO: string): Promise<AdjSeries> {
+  const raw = await fetchEod(env, eodhdSymbol(sec), fromISO, toISO);
+  const bars: Bar[] = raw.map((b) => ({ date: b.date, raw: b.close, adj: b.adjusted_close }));
+  return { bars };
+}
+
+// Pure resolver lives in the import-free leaf module so it's unit-testable; re-exported here so
+// callers keep importing the price API from one place.
+export { adjCloseFromSeries, type AdjSeries };
 
 function isoPlusDays(iso: string, n: number): string {
   const d = new Date(`${dateOnly(iso)}T00:00:00Z`);

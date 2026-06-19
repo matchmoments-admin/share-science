@@ -9,7 +9,7 @@
  */
 import type { Env } from '../types.js';
 import { escapeHtml, pct } from './render.js';
-import { spentTodayCents } from './usage.js';
+import { spentTodayCents, eodhdCallsToday, eodhdCallBudget } from './usage.js';
 import { timingSafeEqual, nowISO, dateOnly } from './db.js';
 import { BRAND_HEAD } from './theme.js';
 import { alpacaMode, tradingPaused, MAX_NOTIONAL_USD } from './alpaca.js';
@@ -71,6 +71,7 @@ const TIP: Record<string, string> = {
   // jobs
   'jobs-section': 'Manual triggers for the background tasks that normally run on a schedule. Each button POSTs to an admin endpoint and dumps the raw result into the box below. The metrics above do NOT live-update — reload the page to see them move.',
   'jobs-spend': "Today's metered AI spend against the daily cap. Counts only LLM tip extraction and weekly digest drafting — market-data and beehiiv calls are unmetered. Resets at 00:00 UTC. At the cap, new AI extraction defers; free jobs keep running.",
+  'jobs-eodhd': 'EODHD market-data API calls made today vs the soft daily budget. Daily valuation fetches each security once (cached, so repeat runs cost ~0). If the budget is hit, valuation defers rather than risk blowing the EODHD plan limit. Resets 00:00 UTC.',
   'job-run-daily': 'Opens positions for approved tips, re-prices everything, and recomputes the leaderboard and the $1,000 chart. Uses market data (not budget-metered). Idempotent — safe to click repeatedly. Run it after approving trades or a poll, or when the chart looks stale.',
   'job-poll': "Fetches the latest blogs, Bluesky posts and podcasts and queues any new items. Free (just HTTP). The paid AI extraction runs later in the queue and is what checks the budget — so over budget, polling 'succeeds' but no tips appear. Dedupes by content hash; safe to repeat.",
   'job-backfill': 'One-off cleanup that fills the short/swing/hold label and target horizon on old tips missing it, up to 500 per click. Zero cost, deterministic. If the result says more:true, click again for the next 500. Safe to repeat.',
@@ -395,6 +396,8 @@ export async function adminDashboard(env: Env): Promise<Response> {
   // True percent (can exceed 100 — withinBudget gates on estimate, recordSpend records actual).
   const spentPct = cap > 0 ? Math.round((spent / cap) * 100) : 0;
   const spendLabel = `${spentPct}% of cap${spentPct > 100 ? ' · over' : ''}`;
+  const eodhdCalls = await eodhdCallsToday(env).catch(() => null);
+  const eodhdBudget = eodhdCallBudget(env);
 
   const [tipsAgg] = await rows<{ total: number; resolved: number }>(env, `SELECT COUNT(*) total, SUM(CASE WHEN security_id IS NOT NULL THEN 1 ELSE 0 END) resolved FROM tips`);
   const [posAgg] = await rows<{ open: number; closed: number }>(env, `SELECT SUM(status='open') open, SUM(status='closed') closed FROM positions`);
@@ -587,7 +590,7 @@ export async function adminDashboard(env: Env): Promise<Response> {
             </div></section>`;
         })()}
         <!-- JOBS -->
-        <section class="card" id="jobs"><header><div><h3>Run a job${tip('jobs-section')}</h3><p class="csub">Spend today: $${(spent / 100).toFixed(2)} / $${(cap / 100).toFixed(0)} · ${spendLabel}${tip('jobs-spend')}</p></div></header>
+        <section class="card" id="jobs"><header><div><h3>Run a job${tip('jobs-section')}</h3><p class="csub">Spend today: $${(spent / 100).toFixed(2)} / $${(cap / 100).toFixed(0)} · ${spendLabel}${tip('jobs-spend')} · EODHD ${eodhdCalls == null ? '–' : eodhdCalls}${eodhdBudget ? `/${eodhdBudget}` : ''} calls${tip('jobs-eodhd')}</p></div></header>
           <div class="body"><div class="actions">
             <span class="jobwrap"><button data-act="/admin/run-daily">Run daily</button>${tip('job-run-daily')}</span>
             <span class="jobwrap"><button data-act="/admin/poll" class="ghost">Poll producers</button>${tip('job-poll')}</span>
@@ -660,24 +663,40 @@ function errHint(sig: string): string | null {
 }
 
 export async function adminErrors(env: Env): Promise<Response> {
-  const recent = (await env.DB.prepare(
-    `SELECT id, detail, created_at FROM ops_events WHERE kind='error' AND created_at >= datetime('now','-7 day') ORDER BY created_at DESC LIMIT 500`,
-  ).all<OpsRow>()).results ?? [];
   const dayAgo = new Date(Date.now() - 86_400_000).toISOString();
+  const rowsOf = async (kind: string) => (await env.DB.prepare(
+    `SELECT id, detail, created_at FROM ops_events WHERE kind=? AND created_at >= datetime('now','-7 day') ORDER BY created_at DESC LIMIT 500`,
+  ).bind(kind).all<OpsRow>()).results ?? [];
+  const errorRows = await rowsOf('error');
+  const warnRows = await rowsOf('warn');
+  const eodhdCalls = await eodhdCallsToday(env).catch(() => null);
+  const eodhdBudget = eodhdCallBudget(env);
 
-  // Group by signature.
-  const groups = new Map<string, { at: string; sig: string; n24: number; n7: number; last: string; sample: string }>();
-  for (const r of recent) {
-    const { at, sig } = errSignature(r.detail);
-    const g = groups.get(sig) ?? { at, sig, n24: 0, n7: 0, last: r.created_at, sample: r.detail ?? '' };
-    g.n7 += 1;
-    if (r.created_at >= dayAgo) g.n24 += 1;
-    if (r.created_at > g.last) g.last = r.created_at;
-    groups.set(sig, g);
-  }
-  const ranked = [...groups.values()].sort((a, b) => b.n24 - a.n24 || b.n7 - a.n7);
-  const n24total = recent.filter((r) => r.created_at >= dayAgo).length;
-  const hints = [...new Set(ranked.map((g) => errHint(g.sig)).filter(Boolean) as string[])];
+  // Group a row list by normalised signature.
+  const groupRows = (list: OpsRow[]) => {
+    const groups = new Map<string, { at: string; sig: string; n24: number; n7: number; last: string }>();
+    for (const r of list) {
+      const { at, sig } = errSignature(r.detail);
+      const g = groups.get(sig) ?? { at, sig, n24: 0, n7: 0, last: r.created_at };
+      g.n7 += 1;
+      if (r.created_at >= dayAgo) g.n24 += 1;
+      if (r.created_at > g.last) g.last = r.created_at;
+      groups.set(sig, g);
+    }
+    return [...groups.values()].sort((a, b) => b.n24 - a.n24 || b.n7 - a.n7);
+  };
+  const ranked = groupRows(errorRows);
+  const warnRanked = groupRows(warnRows);
+  const n24total = errorRows.filter((r) => r.created_at >= dayAgo).length;
+  const hints = [...new Set([...ranked, ...warnRanked].map((g) => errHint(g.sig)).filter(Boolean) as string[])];
+
+  const groupTable = (rk: typeof ranked) => `<table><thead><tr><th>Stage</th><th>Signature</th><th class="num">24h</th><th class="num">7d</th><th>Last seen</th></tr></thead><tbody>
+    ${rk.map((g) => `<tr>
+      <td><span class="pill">${escapeHtml(g.at)}</span></td>
+      <td class="muted" style="white-space:normal;max-width:420px;font-size:.82rem">${escapeHtml(g.sig)}</td>
+      <td class="num"><b>${g.n24}</b></td><td class="num">${g.n7}</td>
+      <td class="mono muted" style="font-size:.74rem">${escapeHtml(g.last.slice(0, 16).replace('T', ' '))}</td></tr>`).join('')}
+    </tbody></table>`;
 
   const body = `<div class="app">${railNav('overview')}<div class="main">
     <header class="topbar"><div class="search">${icon('pulse', 15)}<span>Errors — what is breaking</span></div>
@@ -686,22 +705,24 @@ export async function adminErrors(env: Env): Promise<Response> {
     <div class="content">
       ${hints.length ? hints.map((h) => `<div class="panel" style="border-color:var(--bad);border-width:2px;background:color-mix(in srgb, var(--bad) 7%, var(--card));padding:14px 16px"><b style="color:var(--bad)">Likely cause:</b> ${escapeHtml(h)}</div>`).join('') : ''}
 
-      <h2 style="margin-top:0">Error groups <span class="muted" style="font-weight:400;font-size:.8em">· ${n24total} in 24h · ${recent.length} in 7d</span></h2>
-      <div class="panel">${ranked.length === 0 ? '<p class="muted">No errors in the last 7 days. ✓</p>' :
-        `<table><thead><tr><th>Stage</th><th>Signature</th><th class="num">24h</th><th class="num">7d</th><th>Last seen</th></tr></thead><tbody>
-        ${ranked.map((g) => `<tr>
-          <td><span class="pill">${escapeHtml(g.at)}</span></td>
-          <td class="muted" style="white-space:normal;max-width:420px;font-size:.82rem">${escapeHtml(g.sig)}</td>
-          <td class="num"><b>${g.n24}</b></td><td class="num">${g.n7}</td>
-          <td class="mono muted" style="font-size:.74rem">${escapeHtml(g.last.slice(0, 16).replace('T', ' '))}</td></tr>`).join('')}
-        </tbody></table>`}</div>
+      <div class="grid stats">
+        <div class="card"><div class="k">EODHD calls today</div><div class="v">${eodhdCalls == null ? '–' : eodhdCalls}${eodhdBudget ? `<small>/${eodhdBudget}</small>` : ''}</div><div class="sub">soft cap before a run defers${eodhdBudget ? '' : ' (uncapped)'}</div></div>
+        <div class="card"><div class="k">Real errors (24h)</div><div class="v">${n24total}</div><div class="sub">${errorRows.length} in 7d</div></div>
+        <div class="card"><div class="k">Transient (7d)</div><div class="v">${warnRows.length}</div><div class="sub">auto-retried / backed off</div></div>
+      </div>
+
+      <h2>Error groups <span class="muted" style="font-weight:400;font-size:.8em">· ${n24total} in 24h · ${errorRows.length} in 7d</span></h2>
+      <div class="panel">${ranked.length === 0 ? '<p class="muted">No real errors in the last 7 days. ✓</p>' : groupTable(ranked)}</div>
+
+      <h2>Transient / external <span class="muted" style="font-weight:400;font-size:.8em">· auto-retried — not alarming</span></h2>
+      <div class="panel">${warnRanked.length === 0 ? '<p class="muted">None.</p>' : groupTable(warnRanked)}</div>
 
       <h2>Recent errors (raw)</h2>
-      <div class="panel">${recent.length === 0 ? '<p class="muted">None.</p>' :
+      <div class="panel">${errorRows.length === 0 ? '<p class="muted">None.</p>' :
         `<table><thead><tr><th>When (UTC)</th><th>Detail</th></tr></thead><tbody>
-        ${recent.slice(0, 100).map((r) => `<tr><td class="mono muted" style="font-size:.72rem;white-space:nowrap">${escapeHtml(r.created_at.slice(0, 19).replace('T', ' '))}</td>
+        ${errorRows.slice(0, 100).map((r) => `<tr><td class="mono muted" style="font-size:.72rem;white-space:nowrap">${escapeHtml(r.created_at.slice(0, 19).replace('T', ' '))}</td>
           <td class="mono" style="white-space:normal;word-break:break-word;font-size:.74rem">${escapeHtml(r.detail || '')}</td></tr>`).join('')}
-        </tbody></table>${recent.length > 100 ? `<p class="muted" style="font-size:.78rem">Showing 100 of ${recent.length} (7-day window, capped at 500).</p>` : ''}`}</div>
+        </tbody></table>${errorRows.length > 100 ? `<p class="muted" style="font-size:.78rem">Showing 100 of ${errorRows.length} (7-day window, capped at 500).</p>` : ''}`}</div>
     </div></div></div>`;
   return shell('Errors', body);
 }

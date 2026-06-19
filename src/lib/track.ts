@@ -8,7 +8,11 @@
  */
 import type { Env, Security } from '../types.js';
 import { nowISO, dateOnly, addDays, logOps } from './db.js';
-import { getAdjCloseAsOf, getLatestAdjClose, type PriceCache } from './prices.js';
+import {
+  getAdjCloseAsOf, getLatestAdjClose, getAdjCloseSeries, adjCloseFromSeries,
+  EodhdAccountError, type PriceCache, type AdjSeries,
+} from './prices.js';
+import { eodhdWithinBudget, eodhdCallsToday, eodhdCallBudget } from './usage.js';
 import { maxDrawdown, periodReturns, annualisedVol, sharpe } from './stats.js';
 
 const HORIZONS = [30, 90, 365];
@@ -29,42 +33,78 @@ interface OpenPosition {
   target_hit_at: string | null;
 }
 
-export async function valueOpenPositions(env: Env, todayISO = nowISO()): Promise<{ valued: number; closed: number; open_remaining: number }> {
+export async function valueOpenPositions(env: Env, todayISO = nowISO()): Promise<{ valued: number; closed: number; open_remaining: number; skipped?: string }> {
+  const remainingOpen = async () => (await env.DB.prepare(`SELECT count(*) AS n FROM positions WHERE status = 'open'`).first<{ n: number }>())?.n ?? 0;
+
+  // Soft EODHD call budget: never blow the daily plan limit (automation-safety rule #3 for market data).
+  if (!(await eodhdWithinBudget(env))) {
+    const calls = await eodhdCallsToday(env).catch(() => 0);
+    await logOps(env, 'warn', { at: 'valueOpenPositions', skipped: 'eodhd_budget', calls_today: calls, budget: eodhdCallBudget(env) });
+    return { valued: 0, closed: 0, open_remaining: await remainingOpen(), skipped: 'eodhd_budget' };
+  }
+
+  // Value each open position at most once per UTC day (skip-valued-today) so repeat manual runs cost
+  // ~0 EODHD calls — the first run of the day does the valuation + any due horizon snapshot.
   const res = await env.DB.prepare(
     `SELECT p.id, p.tip_id, p.security_id, p.benchmark_id, p.entry_at, p.entry_price_adj, t.direction,
             t.target_price_raw, p.target_hit_at
        FROM positions p JOIN tips t ON t.id = p.tip_id
-      WHERE p.status = 'open'
+      WHERE p.status = 'open' AND (p.last_valued_at IS NULL OR date(p.last_valued_at) < date(?))
       ORDER BY p.last_valued_at ASC
       LIMIT ?`,
-  ).bind(MAX_POSITIONS_PER_RUN).all<OpenPosition>();
+  ).bind(dateOnly(todayISO), MAX_POSITIONS_PER_RUN).all<OpenPosition>();
+  const positions = res.results ?? [];
 
-  const cache: PriceCache = new Map(); // shared across all positions this run (benchmark etc.)
+  const cache: PriceCache = new Map(); // shared across all positions this run
+  // Pre-fetch each benchmark's adjusted-close series ONCE (shared across every position) instead of
+  // two per-position as-of calls — the single biggest call-volume win.
+  const benchSeries = new Map<string, AdjSeries>();
+  if (positions.length) {
+    const minEntry = positions.reduce((m, p) => (p.entry_at < m ? p.entry_at : m), todayISO);
+    const fromISO = addDays(minEntry, -10); // small buffer for "most recent at/before entry"
+    for (const benchId of new Set(positions.map((p) => p.benchmark_id).filter((b): b is string => !!b))) {
+      try {
+        const bsec = await benchSecurity(env, benchId);
+        if (bsec) benchSeries.set(benchId, await getAdjCloseSeries(env, bsec, fromISO, dateOnly(todayISO)));
+      } catch (err) {
+        if (err instanceof EodhdAccountError) {
+          await logOps(env, 'error', { at: 'valueOpenPositions', err: 'market_data_unavailable', status: err.status, skipped: positions.length });
+          return { valued: 0, closed: 0, open_remaining: await remainingOpen(), skipped: 'market_data_unavailable' };
+        }
+        await logOps(env, 'warn', { at: 'valueOpenPositions.benchmark', benchmark: benchId, err: String(err) });
+      }
+    }
+  }
+
   let valued = 0;
   let closed = 0;
-  for (const pos of res.results ?? []) {
+  for (const pos of positions) {
     try {
-      const didClose = await valueOne(env, pos, todayISO, cache);
+      const didClose = await valueOne(env, pos, todayISO, cache, benchSeries);
       valued++;
       if (didClose) closed++;
     } catch (err) {
+      // Account-level failure (over-quota/auth) hits every symbol — stop the run instead of hammering.
+      if (err instanceof EodhdAccountError) {
+        await logOps(env, 'error', { at: 'valueOpenPositions', err: 'market_data_unavailable', status: err.status, skipped: positions.length - valued });
+        return { valued, closed, open_remaining: (await remainingOpen()) - closed, skipped: 'market_data_unavailable' };
+      }
       await logOps(env, 'error', { at: 'valueOpenPositions', position: pos.id, err: String(err) });
     }
   }
-  const remaining = await env.DB.prepare(`SELECT count(*) AS n FROM positions WHERE status = 'open'`).first<{ n: number }>();
-  return { valued, closed, open_remaining: (remaining?.n ?? valued) - closed };
+  return { valued, closed, open_remaining: (await remainingOpen()) - closed };
 }
 
-async function valueOne(env: Env, pos: OpenPosition, todayISO: string, cache: PriceCache): Promise<boolean> {
+async function valueOne(env: Env, pos: OpenPosition, todayISO: string, cache: PriceCache, benchSeries: Map<string, AdjSeries>): Promise<boolean> {
   const sec = await secById(env, pos.security_id);
   if (!sec) return false;
-  const bench = pos.benchmark_id ? await benchSecurity(env, pos.benchmark_id) : null;
+  const bseries = pos.benchmark_id ? benchSeries.get(pos.benchmark_id) ?? null : null;
 
   // Current valuation (latest available close).
   const latest = await getLatestAdjClose(env, sec, todayISO, cache);
   if (latest) {
     const ret = latest.adj / pos.entry_price_adj - 1;
-    const benchRet = bench ? await benchReturn(env, bench, pos.entry_at, latest.date, cache) : null;
+    const benchRet = bseries ? benchReturnFromSeries(bseries, pos.entry_at, latest.date) : null;
     const excess = benchRet === null ? null : ret - benchRet;
     await env.DB.prepare(
       `INSERT OR REPLACE INTO valuations (position_id, as_of, price_adj, return_pct, excess_pct)
@@ -95,7 +135,7 @@ async function valueOne(env: Env, pos: OpenPosition, todayISO: string, cache: Pr
     const at = await getAdjCloseAsOf(env, sec, target, cache);
     if (!at) continue;
     const ret = at.adj / pos.entry_price_adj - 1;
-    const benchRet = bench ? await benchReturn(env, bench, pos.entry_at, at.date, cache) : null;
+    const benchRet = bseries ? benchReturnFromSeries(bseries, pos.entry_at, at.date) : null;
     const excess = benchRet === null ? null : ret - benchRet;
     const isHit = excess === null ? null : hit(pos.direction, excess) ? 1 : 0;
     await env.DB.prepare(
@@ -170,9 +210,10 @@ function daysBetween(fromISO: string, toISO: string): number {
   return Math.round((b - a) / 86_400_000);
 }
 
-async function benchReturn(env: Env, bench: Security, entryAt: string, asOf: string, cache: PriceCache): Promise<number | null> {
-  const start = await getAdjCloseAsOf(env, bench, entryAt, cache);
-  const end = await getAdjCloseAsOf(env, bench, asOf, cache);
+/** Benchmark return from a pre-fetched series — same math as before, zero extra EODHD calls. */
+function benchReturnFromSeries(series: AdjSeries, entryAt: string, asOf: string): number | null {
+  const start = adjCloseFromSeries(series, entryAt);
+  const end = adjCloseFromSeries(series, asOf);
   if (!start || !end || !start.adj) return null;
   return end.adj / start.adj - 1;
 }

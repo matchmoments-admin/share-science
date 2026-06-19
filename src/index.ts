@@ -7,7 +7,7 @@
  */
 import type { Env, TipIngestMessage } from './types.js';
 import { uid, nowISO, logOps, timingSafeEqual } from './lib/db.js';
-import { spentTodayCents, withinBudget, recordSpend } from './lib/usage.js';
+import { spentTodayCents, withinBudget, recordSpend, eodhdCallsToday, eodhdCallBudget } from './lib/usage.js';
 import { ingest, verifyHmac, type IngestInput } from './lib/ingest.js';
 import { extractTips } from './lib/extract.js';
 import { resolveSecurity } from './lib/resolve.js';
@@ -89,6 +89,8 @@ async function handleHealthz(env: Env): Promise<Response> {
     public_prices: env.PUBLIC_PRICES,
     spend_today_cents: await spentTodayCents(env).catch(() => null),
     daily_cap_cents: Number(env.MAX_DAILY_COST_CENTS) || null,
+    eodhd_calls_today: await eodhdCallsToday(env).catch(() => null),
+    eodhd_call_budget: eodhdCallBudget(env) || null,
     newsletter,
     time: nowISO(),
   });
@@ -375,7 +377,10 @@ export default {
         await consumeOne(env, msg.body);
         msg.ack();
       } catch (err) {
-        await logOps(env, 'error', { at: 'queue', ingest_item: msg.body.ingest_item_id, err: String(err) });
+        // Retryable provider blips (Anthropic 429/529/503) are transient and the queue will retry —
+        // log as 'warn' so they don't drive the HIGH "Errors" alarm. Reserve 'error' for the rest.
+        const retryable = /\b(429|503|529)\b|overloaded|rate.?limit/i.test(String(err));
+        await logOps(env, retryable ? 'warn' : 'error', { at: 'queue', ingest_item: msg.body.ingest_item_id, err: String(err), retrying: true });
         msg.retry(); // DLQ after max_retries
       }
     }
