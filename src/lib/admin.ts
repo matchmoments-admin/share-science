@@ -409,7 +409,15 @@ export async function adminDashboard(env: Env): Promise<Response> {
   const horizons = await rows<{ horizon_days: number; n: number; hits: number; alpha: number | null }>(env, `SELECT horizon_days, COUNT(*) n, SUM(is_hit) hits, AVG(excess_pct) alpha FROM tip_returns WHERE is_hit IS NOT NULL GROUP BY horizon_days ORDER BY horizon_days`);
   const [reviewTips] = await rows<{ n: number }>(env, `SELECT COUNT(*) n FROM tips WHERE status='review'`);
   const [pendPos] = await rows<{ n: number }>(env, `SELECT COUNT(*) n FROM tips t LEFT JOIN positions p ON p.tip_id=t.id WHERE t.security_id IS NOT NULL AND p.id IS NULL`);
-  const [err24] = await rows<{ n: number }>(env, `SELECT COUNT(*) n FROM ops_events WHERE kind='error' AND created_at >= datetime('now','-1 day')`);
+  // "Active" errors = real errors in the last 24h that happened AFTER the most recent successful
+  // valuation — so an issue you've since fixed and re-run no longer alarms. NOTE: created_at is ISO
+  // ('T'-separated), so we MUST compare against an ISO bound, never SQLite datetime('now') (which is
+  // space-separated and string-compares as if every row were "recent").
+  const lastValuedAt = (await env.DB.prepare(`SELECT MAX(last_valued_at) m FROM positions`).first<{ m: string | null }>())?.m ?? null;
+  const iso24 = new Date(Date.now() - 86_400_000).toISOString();
+  const err24 = await env.DB.prepare(
+    `SELECT COUNT(*) n FROM ops_events WHERE kind='error' AND created_at >= ? AND (? IS NULL OR created_at > ?)`,
+  ).bind(iso24, lastValuedAt, lastValuedAt).first<{ n: number }>();
   const [unsynced] = await rows<{ n: number }>(env, `SELECT COUNT(*) n FROM subscribers WHERE status='active' AND beehiiv_synced_at IS NULL`);
   const sharers = await rows<{ name: string; medium: string; tips: number; settled: number | null; hit_rate: number | null; score_lower: number | null; tier: string | null }>(env,
     `SELECT s.name, s.medium, COUNT(t.id) tips, sr.n_tips settled, sr.hit_rate, sr.score_lower, sr.tier
@@ -442,7 +450,7 @@ export async function adminDashboard(env: Env): Promise<Response> {
 
   // Needs-attention triage (operational). Each item links to where the operator resolves it.
   const triage = [
-    err24?.n ? { sev: 'high', kind: 'Errors', t: `${err24.n} error event${err24.n === 1 ? '' : 's'} in 24h`, d: 'Open the errors page to see what is breaking', href: '/admin/errors' } : null,
+    err24?.n ? { sev: 'high', kind: 'Errors', t: `${err24.n} active error${err24.n === 1 ? '' : 's'} (24h)`, d: 'Errors since the last successful run — open the errors page', href: '/admin/errors' } : null,
     spentPct >= 90 ? { sev: 'high', kind: 'Budget', t: `LLM spend at ${spentPct}% of cap`, d: 'AI extraction defers until the daily reset (00:00 UTC)', href: '#jobs' } : null,
     reviewTips?.n ? { sev: 'med', kind: 'Review', t: `${reviewTips.n} tip${reviewTips.n === 1 ? '' : 's'} need review`, d: 'Unresolved security — open the review queue (view-only for now)', href: '/admin/approvals' } : null,
     pendPos?.n ? { sev: 'med', kind: 'Pipeline', t: `${pendPos.n} resolved tip${pendPos.n === 1 ? '' : 's'} awaiting a position`, d: 'Run the daily pass below to open + value them', href: '#jobs' } : null,
@@ -664,13 +672,19 @@ function errHint(sig: string): string | null {
 
 export async function adminErrors(env: Env): Promise<Response> {
   const dayAgo = new Date(Date.now() - 86_400_000).toISOString();
+  const weekAgo = new Date(Date.now() - 7 * 86_400_000).toISOString();
+  // created_at is ISO ('T'-separated) — compare against an ISO bound, NOT SQLite datetime('now')
+  // (space-separated, which string-compares as if every row were recent).
   const rowsOf = async (kind: string) => (await env.DB.prepare(
-    `SELECT id, detail, created_at FROM ops_events WHERE kind=? AND created_at >= datetime('now','-7 day') ORDER BY created_at DESC LIMIT 500`,
-  ).bind(kind).all<OpsRow>()).results ?? [];
+    `SELECT id, detail, created_at FROM ops_events WHERE kind=? AND created_at >= ? ORDER BY created_at DESC LIMIT 500`,
+  ).bind(kind, weekAgo).all<OpsRow>()).results ?? [];
   const errorRows = await rowsOf('error');
   const warnRows = await rowsOf('warn');
   const eodhdCalls = await eodhdCallsToday(env).catch(() => null);
   const eodhdBudget = eodhdCallBudget(env);
+  // A group is "resolved" if its newest occurrence predates the most recent successful valuation —
+  // i.e. you've since fixed it and a run has succeeded. Used to stop alarming on already-fixed issues.
+  const lastValuedAt = (await env.DB.prepare(`SELECT MAX(last_valued_at) m FROM positions`).first<{ m: string | null }>())?.m ?? null;
 
   // Group a row list by normalised signature.
   const groupRows = (list: OpsRow[]) => {
@@ -683,17 +697,22 @@ export async function adminErrors(env: Env): Promise<Response> {
       if (r.created_at > g.last) g.last = r.created_at;
       groups.set(sig, g);
     }
-    return [...groups.values()].sort((a, b) => b.n24 - a.n24 || b.n7 - a.n7);
+    return [...groups.values()]
+      .map((g) => ({ ...g, resolved: !!lastValuedAt && g.last < lastValuedAt }))
+      .sort((a, b) => Number(a.resolved) - Number(b.resolved) || b.n24 - a.n24 || b.n7 - a.n7);
   };
   const ranked = groupRows(errorRows);
   const warnRanked = groupRows(warnRows);
+  const activeErr = ranked.filter((g) => !g.resolved);
   const n24total = errorRows.filter((r) => r.created_at >= dayAgo).length;
-  const hints = [...new Set([...ranked, ...warnRanked].map((g) => errHint(g.sig)).filter(Boolean) as string[])];
+  // Only surface a red "Likely cause" banner for ACTIVE (unresolved) error groups.
+  const hints = [...new Set(activeErr.map((g) => errHint(g.sig)).filter(Boolean) as string[])];
 
-  const groupTable = (rk: typeof ranked) => `<table><thead><tr><th>Stage</th><th>Signature</th><th class="num">24h</th><th class="num">7d</th><th>Last seen</th></tr></thead><tbody>
+  const groupTable = (rk: typeof ranked) => `<table><thead><tr><th>Status</th><th>Stage</th><th>Signature</th><th class="num">24h</th><th class="num">7d</th><th>Last seen</th></tr></thead><tbody>
     ${rk.map((g) => `<tr>
+      <td>${g.resolved ? '<span class="pill" style="color:var(--good);border-color:var(--good)">resolved ✓</span>' : '<span class="pill" style="background:var(--bad);color:#fff;border:none">active</span>'}</td>
       <td><span class="pill">${escapeHtml(g.at)}</span></td>
-      <td class="muted" style="white-space:normal;max-width:420px;font-size:.82rem">${escapeHtml(g.sig)}</td>
+      <td class="muted" style="white-space:normal;max-width:380px;font-size:.82rem">${escapeHtml(g.sig)}</td>
       <td class="num"><b>${g.n24}</b></td><td class="num">${g.n7}</td>
       <td class="mono muted" style="font-size:.74rem">${escapeHtml(g.last.slice(0, 16).replace('T', ' '))}</td></tr>`).join('')}
     </tbody></table>`;
@@ -703,15 +722,17 @@ export async function adminErrors(env: Env): Promise<Response> {
       <a href="/admin" class="pill" style="text-decoration:none">← Overview</a>
       <button onclick="location.reload()">↻ Refresh</button></header>
     <div class="content">
-      ${hints.length ? hints.map((h) => `<div class="panel" style="border-color:var(--bad);border-width:2px;background:color-mix(in srgb, var(--bad) 7%, var(--card));padding:14px 16px"><b style="color:var(--bad)">Likely cause:</b> ${escapeHtml(h)}</div>`).join('') : ''}
+      ${hints.length
+        ? hints.map((h) => `<div class="panel" style="border-color:var(--bad);border-width:2px;background:color-mix(in srgb, var(--bad) 7%, var(--card));padding:14px 16px"><b style="color:var(--bad)">Likely cause:</b> ${escapeHtml(h)}</div>`).join('')
+        : `<div class="panel" style="border-color:var(--good);background:color-mix(in srgb, var(--good) 6%, var(--card));padding:14px 16px"><b style="color:var(--good)">No active errors.</b> ${ranked.length ? 'Everything below was resolved by a later successful run — shown for history.' : 'Nothing has failed recently. ✓'}</div>`}
 
       <div class="grid stats">
         <div class="card"><div class="k">EODHD calls today</div><div class="v">${eodhdCalls == null ? '–' : eodhdCalls}${eodhdBudget ? `<small>/${eodhdBudget}</small>` : ''}</div><div class="sub">soft cap before a run defers${eodhdBudget ? '' : ' (uncapped)'}</div></div>
-        <div class="card"><div class="k">Real errors (24h)</div><div class="v">${n24total}</div><div class="sub">${errorRows.length} in 7d</div></div>
+        <div class="card"><div class="k">Active errors</div><div class="v">${activeErr.length}</div><div class="sub">unresolved groups (${n24total} events 24h)</div></div>
         <div class="card"><div class="k">Transient (7d)</div><div class="v">${warnRows.length}</div><div class="sub">auto-retried / backed off</div></div>
       </div>
 
-      <h2>Error groups <span class="muted" style="font-weight:400;font-size:.8em">· ${n24total} in 24h · ${errorRows.length} in 7d</span></h2>
+      <h2>Error groups <span class="muted" style="font-weight:400;font-size:.8em">· ${activeErr.length} active · ${ranked.length} total (7d)</span></h2>
       <div class="panel">${ranked.length === 0 ? '<p class="muted">No real errors in the last 7 days. ✓</p>' : groupTable(ranked)}</div>
 
       <h2>Transient / external <span class="muted" style="font-weight:400;font-size:.8em">· auto-retried — not alarming</span></h2>
