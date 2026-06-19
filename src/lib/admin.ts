@@ -13,6 +13,8 @@ import { spentTodayCents, eodhdCallsToday, eodhdCallBudget } from './usage.js';
 import { timingSafeEqual, nowISO, dateOnly } from './db.js';
 import { BRAND_HEAD } from './theme.js';
 import { alpacaMode, tradingPaused, MAX_NOTIONAL_USD } from './alpaca.js';
+import { isoWeek } from './content.js';
+import { configured as beehiivConfigured } from './beehiiv.js';
 
 const COOKIE = 'ss_admin';
 const COOKIE_TTL_S = 8 * 3600;
@@ -36,6 +38,8 @@ const ICON: Record<string, string> = {
   inbox: '<path d="M22 12h-6l-2 3h-4l-2-3H2"/><path d="M5.45 5.11 2 12v6a2 2 0 0 0 2 2h16a2 2 0 0 0 2-2v-6l-3.45-6.89A2 2 0 0 0 16.76 4H7.24a2 2 0 0 0-1.79 1.11z"/>',
   coins: '<circle cx="8" cy="8" r="6"/><path d="M18.09 10.37A6 6 0 1 1 10.34 18M7 6h1v4M16.71 13.88l.7.71-2.82 2.82"/>',
   info: '<circle cx="12" cy="12" r="10"/><path d="M12 16v-4"/><path d="M12 8h.01"/>',
+  rss: '<path d="M4 11a9 9 0 0 1 9 9"/><path d="M4 4a16 16 0 0 1 16 16"/><circle cx="5" cy="19" r="1"/>',
+  plus: '<path d="M12 5v14"/><path d="M5 12h14"/>',
 };
 const icon = (name: string, size = 18) =>
   `<svg width="${size}" height="${size}" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round">${ICON[name] || ''}</svg>`;
@@ -95,7 +99,16 @@ const TIP: Record<string, string> = {
   'dim:horizon:365': 'Ranking that judges each tip 365 days after it was made — the strongest long-term signal, but the slowest to fill.',
   'dim:primary': "Judges each tip at the timeframe the sharer intended (the settled window nearest its stated horizon). Tips whose intended window hasn't settled are skipped. The fairest single ranking.",
   'dim:conviction:90': 'A 90-day ranking where higher-conviction tips count for more (high=3, medium=2, low=1) in Hit and Alpha. The Score stays on the raw unweighted sample, so labelling everything high-conviction cannot manufacture statistical confidence.',
+  // sources / add-tip
+  'src-add': 'Creates a row in the sources table. A tip must reference an existing source (foreign key), so add the source before its first tip. Method picks the pipeline: manual = you paste tips; rss_fulltext / podcast_transcript / bluesky = auto-polled by the hourly cron.',
+  'src-list': 'Every source. Pause sets active=0 so the cron stops polling it without deleting history; resume re-enables it. tos_checked stays 0 until you have verified the feed’s terms of service.',
+  'tip-add': 'Submits to the same /ingest/human seam the automated pollers use: Claude extracts the call, resolve.ts matches the security (or abstains → review queue), and the daily pass opens a paper position at the first market bar AFTER the publish date.',
+  'tip-date': 'The REAL publication date of the tip — this is the look-ahead anchor. Entry price is the first market bar strictly after it, so back-dating to today would fabricate a same-day entry. Rejected if in the future or older than ~3 years.',
   // newsletter
+  'nl-subs': 'Active newsletter subscribers (status=active) and how many are mirrored into beehiiv. The daily cron syncs them; “Sync subscribers” forces it now.',
+  'nl-actions': 'Generate/regenerate runs the LLM draft (budget-gated, compliance-checked, stored in R2). Preview opens the stored HTML. Push creates a beehiiv DRAFT — it never sends; you review and send inside beehiiv.',
+  'nl-failed': 'The beehiiv draft API returned an error (it is Enterprise-beta and may 403). The generated issue is still in R2 — preview it and paste into beehiiv manually.',
+  'nl-history': 'The digest_publications ledger: one row per week’s push attempt with beehiiv status (drafted/failed) and post id. A failed push shows its reason instead of failing silently.',
   'newsletter-panel': "The weekly issue's publish state: was this week's digest generated, was a beehiiv DRAFT created (or did it 403), and has it been sent. Nothing auto-sends — you click Send in beehiiv. Subscriber counts are the D1 capture record; beehiiv→D1 reconciliation lands later, so 'active' may over-count until then.",
   'newsletter-failed': 'The beehiiv draft API returned an error (it is Enterprise-beta and may 403). The generated issue is still saved — open the preview, copy the HTML, and paste it into a new beehiiv post manually.',
   // activity
@@ -129,6 +142,9 @@ function railNav(active: string): string {
     ${it('/admin', 'grid', 'overview', 'Overview')}
     ${it('/admin/approvals', 'inbox', 'approvals', 'Approvals')}
     ${it('/admin/trading', 'coins', 'trading', 'Trading')}
+    ${it('/admin/sources', 'rss', 'sources', 'Sources')}
+    ${it('/admin/add-tip', 'plus', 'addtip', 'Add tip')}
+    ${it('/admin/newsletter', 'mail', 'newsletter', 'Newsletter')}
     <div class="spacer"></div>
     <a href="/leaderboard" title="Public site">${icon('gauge')}</a>
     <form method="post" action="/admin/logout"><button class="ghost" style="width:42px;height:42px;border-radius:11px;padding:0" title="Sign out">${icon('settings')}</button></form>
@@ -269,6 +285,16 @@ ${BRAND_HEAD}
   .grid.stats .sub a { color: var(--muted); }
   button { font: inherit; font-weight: 600; padding: 9px 16px; border: none; border-radius: var(--r-pill); background: var(--ink); color: var(--on-dark); cursor: pointer; }
   button.ghost { background: var(--card); color: var(--text); border: 1px solid var(--line); }
+  a.btn { display: inline-block; font: inherit; font-weight: 600; padding: 9px 16px; border-radius: var(--r-pill); background: var(--ink); color: var(--on-dark); text-decoration: none; cursor: pointer; }
+  a.btn.ghost { background: var(--card); color: var(--text); border: 1px solid var(--line); }
+  a.btn:hover { opacity: .9; }
+  .field { display: flex; flex-direction: column; gap: 5px; margin-bottom: 12px; }
+  .field label { font-family: var(--font-mono); font-size: 10px; text-transform: uppercase; letter-spacing: .06em; color: var(--muted); }
+  .field input, .field select, .field textarea { font: inherit; padding: 9px 11px; border: 1px solid var(--line); border-radius: var(--r-md); background: var(--card); color: var(--text); width: 100%; box-sizing: border-box; }
+  .field textarea { min-height: 150px; resize: vertical; font-family: var(--font-mono); font-size: 13px; }
+  .field .hint { font-size: 11px; color: var(--muted); }
+  .formgrid { display: grid; grid-template-columns: 1fr 1fr; gap: 0 16px; }
+  @media (max-width: 720px) { .formgrid { grid-template-columns: 1fr; } }
   button:hover { opacity: .9; } button:disabled { opacity: .5; }
   pre#out { font-family: var(--font-mono); font-size: 12px; background: var(--paper-2); border: 1px solid var(--line); border-radius: var(--r-md); padding: 11px; white-space: pre-wrap; word-break: break-word; min-height: 1rem; color: var(--text-2); }
   kbd { font-family: var(--font-mono); font-size: 10px; border: 1px solid var(--line); border-radius: 4px; padding: 2px 6px; color: var(--muted); }
@@ -809,4 +835,244 @@ export async function adminTrading(env: Env): Promise<Response> {
         </tbody></table>`}</div>
     </div>${ACTION_SCRIPT}</div></div>`;
   return shell('Trading', body);
+}
+
+// ── Sources view ─────────────────────────────────────────────────────
+interface SourceRow { id: string; name: string; medium: string; feed_url: string | null; bluesky_did: string | null; ingest_method: string; active: number | null; last_cursor: string | null }
+
+/** Create + list + activate/deactivate sources. Sources must exist before their first tip (FK). */
+export async function adminSources(env: Env): Promise<Response> {
+  const sources = (await env.DB.prepare(
+    `SELECT id, name, medium, feed_url, bluesky_did, ingest_method, active, last_cursor
+       FROM sources ORDER BY (active IS NULL OR active=1) DESC, name LIMIT 200`,
+  ).all<SourceRow>()).results ?? [];
+
+  const methodPill = (m: string) => `<span class="pill">${escapeHtml(m)}</span>`;
+  const body = `<div class="app">${railNav('sources')}<div class="main">
+    <header class="topbar"><div class="search">${icon('rss', 15)}<span>Sources — where tips come from</span></div>
+      <button onclick="location.reload()">↻ Refresh</button></header>
+    <div class="content">
+      <section class="card"><header><div><h3>Add a source${tip('src-add')}</h3><p class="csub">A source must exist before its first tip. RSS / podcast / Bluesky sources are auto-polled by the hourly cron.</p></div></header>
+        <div class="body">
+          <div class="formgrid">
+            <div class="field"><label>Name *</label><input id="s-name" placeholder="e.g. The Science of Hitting"></div>
+            <div class="field"><label>Ingest method *</label><select id="s-method">
+              <option value="manual">manual — you paste tips by hand</option>
+              <option value="rss_fulltext">rss_fulltext — auto-poll a blog/Substack RSS</option>
+              <option value="podcast_transcript">podcast_transcript — auto-poll a podcast RSS</option>
+              <option value="bluesky">bluesky — auto-poll a Bluesky account</option>
+            </select></div>
+            <div class="field"><label>Home URL</label><input id="s-home" placeholder="https://example.com"></div>
+            <div class="field"><label>Feed URL <span class="hint">(required for rss/podcast)</span></label>
+              <div style="display:flex;gap:6px"><input id="s-feed" placeholder="https://example.com/feed">
+              <button class="ghost" type="button" id="s-findfeed" style="white-space:nowrap">Find feed</button></div></div>
+            <div class="field"><label>Bluesky DID <span class="hint">(required for bluesky)</span></label><input id="s-did" placeholder="did:plc:..."></div>
+            <div class="field"><label>Locale</label><input id="s-locale" placeholder="AU | US | UK | CA"></div>
+          </div>
+          <button id="s-submit">Add source</button>
+          <pre id="out" class="muted" style="margin-top:12px">tos_checked defaults to 0 — verify each feed's terms before relying on it.</pre>
+        </div></section>
+
+      <section class="card"><header><div><h3>Sources${tip('src-list')}</h3><p class="csub">${sources.length} total · pause to stop polling without deleting</p></div></header>
+        <div class="body">${sources.length === 0 ? '<p class="muted">No sources yet.</p>' :
+          `<table><thead><tr><th>Name</th><th>Method</th><th>Locator</th><th>Status</th><th></th></tr></thead><tbody>
+          ${sources.map((s) => {
+            const on = s.active == null || s.active === 1;
+            const locator = s.feed_url || s.bluesky_did || '–';
+            return `<tr>
+              <td><b>${escapeHtml(s.name)}</b> <span class="muted" style="font-size:.74rem">${escapeHtml(s.medium)}</span></td>
+              <td>${methodPill(s.ingest_method)}</td>
+              <td class="mono muted" style="font-size:.72rem;max-width:280px;white-space:normal;word-break:break-all">${escapeHtml(locator)}</td>
+              <td>${on ? '<span class="pill" style="color:var(--good);border-color:var(--good)">active</span>' : '<span class="pill">paused</span>'}</td>
+              <td>${on
+                ? `<button class="ghost" data-toggle="/admin/toggle-source?id=${encodeURIComponent(s.id)}&active=0">Pause</button>`
+                : `<button class="ghost" data-toggle="/admin/toggle-source?id=${encodeURIComponent(s.id)}&active=1">Resume</button>`}</td>
+            </tr>`;
+          }).join('')}</tbody></table>`}</div></section>
+    </div>${ACTION_SCRIPT}
+    <script>
+      (function(){
+        var out=document.getElementById('out');
+        document.querySelectorAll('button[data-toggle]').forEach(function(b){
+          b.addEventListener('click', function(){
+            b.disabled=true; out.textContent='Updating…';
+            fetch(b.getAttribute('data-toggle'),{method:'POST'}).then(function(r){return r.json();})
+              .then(function(j){ if(j.ok){ location.reload(); } else { b.disabled=false; out.textContent='Error: '+(j.error||'failed'); } })
+              .catch(function(e){ b.disabled=false; out.textContent='Error: '+e; });
+          });
+        });
+        document.getElementById('s-findfeed').addEventListener('click', function(){
+          var home=document.getElementById('s-home').value.trim() || document.getElementById('s-feed').value.trim();
+          if(!home){ out.textContent='Enter a Home URL first.'; return; }
+          out.textContent='Searching for a feed…';
+          fetch('/admin/find-feed',{method:'POST',headers:{'content-type':'application/json'},body:JSON.stringify({url:home})})
+            .then(function(r){return r.json();}).then(function(j){
+              if(j.feeds && j.feeds.length){ document.getElementById('s-feed').value=j.feeds[0]; out.textContent='Found: '+j.feeds.join(', '); }
+              else out.textContent='No feed found — paste the feed URL manually.';
+            }).catch(function(e){ out.textContent='Error: '+e; });
+        });
+        document.getElementById('s-submit').addEventListener('click', function(){
+          var b={ name:document.getElementById('s-name').value.trim(),
+                  ingest_method:document.getElementById('s-method').value,
+                  home_url:document.getElementById('s-home').value.trim()||undefined,
+                  feed_url:document.getElementById('s-feed').value.trim()||undefined,
+                  bluesky_did:document.getElementById('s-did').value.trim()||undefined,
+                  locale:document.getElementById('s-locale').value.trim()||undefined };
+          if(!b.name){ out.textContent='Name is required.'; return; }
+          out.textContent='Adding…'; this.disabled=true; var btn=this;
+          fetch('/admin/add-source',{method:'POST',headers:{'content-type':'application/json'},body:JSON.stringify(b)})
+            .then(function(r){return r.json();}).then(function(j){
+              btn.disabled=false;
+              if(j.ok){ out.textContent='Added ✓ — reloading…'; location.reload(); }
+              else out.textContent='Error: '+(j.error||'')+(j.detail?' — '+j.detail:'');
+            }).catch(function(e){ btn.disabled=false; out.textContent='Error: '+e; });
+        });
+      })();
+    </script></div></div>`;
+  return shell('Sources', body);
+}
+
+// ── Add-tip view ─────────────────────────────────────────────────────
+/** Paste a tip found on a blog/podcast, pick its source, set the REAL publish date, submit. */
+export async function adminAddTip(env: Env): Promise<Response> {
+  const sources = (await env.DB.prepare(
+    `SELECT id, name FROM sources WHERE active IS NULL OR active=1 ORDER BY name LIMIT 200`,
+  ).all<{ id: string; name: string }>()).results ?? [];
+
+  const body = `<div class="app">${railNav('addtip')}<div class="main">
+    <header class="topbar"><div class="search">${icon('plus', 15)}<span>Add a tip — paste one you found</span></div>
+      <a href="/admin/sources" class="pill" style="text-decoration:none">+ Source</a>
+      <button onclick="location.reload()">↻ Refresh</button></header>
+    <div class="content">
+      <section class="card"><header><div><h3>Add a tip${tip('tip-add')}</h3><p class="csub">Goes through the same pipeline as automated tips: Claude extracts → resolves the security → opens a paper position at the first bar AFTER the publish date.</p></div></header>
+        <div class="body">
+          ${sources.length === 0 ? '<p class="neg">No active sources yet — <a href="/admin/sources">add a source</a> first.</p>' : `
+          <div class="field"><label>Source *</label><select id="t-source">${sources.map((s) => `<option value="${escapeHtml(s.id)}">${escapeHtml(s.name)}</option>`).join('')}</select></div>
+          <div class="formgrid">
+            <div class="field"><label>Publish date * ${tip('tip-date')}</label><input id="t-date" type="date" required><span class="hint">The REAL date the tip was published — entry is the first market bar after this. Not today unless it's genuinely today.</span></div>
+            <div class="field"><label>Source URL</label><input id="t-url" placeholder="https://… (where you found it)"></div>
+          </div>
+          <div class="field"><label>Tip text *</label><textarea id="t-text" placeholder="Paste the quote / segment that contains the call…"></textarea></div>
+          <button id="t-submit">Submit tip</button>
+          <pre id="out" class="muted" style="margin-top:12px">After submitting, the tip extracts + resolves within seconds. Click “Run daily” on the Overview to open + value it. Unresolved tips land in the review queue.</pre>`}
+        </div></section>
+    </div>
+    <script>
+      (function(){
+        var btn=document.getElementById('t-submit'); if(!btn) return;
+        var out=document.getElementById('out');
+        btn.addEventListener('click', function(){
+          var date=document.getElementById('t-date').value;
+          var text=document.getElementById('t-text').value.trim();
+          if(!date){ out.textContent='Publish date is required.'; return; }
+          if(!text){ out.textContent='Tip text is required.'; return; }
+          var b={ source_id:document.getElementById('t-source').value,
+                  text:text,
+                  url:document.getElementById('t-url').value.trim()||undefined,
+                  detected_at:new Date(date+'T00:00:00Z').toISOString() };
+          out.textContent='Submitting…'; btn.disabled=true;
+          fetch('/ingest/human',{method:'POST',headers:{'content-type':'application/json'},body:JSON.stringify(b)})
+            .then(function(r){return r.json();}).then(function(j){
+              btn.disabled=false; out.textContent=JSON.stringify(j,null,2);
+              if(j.ok && !j.duplicate){ document.getElementById('t-text').value=''; document.getElementById('t-url').value=''; }
+            }).catch(function(e){ btn.disabled=false; out.textContent='Error: '+e; });
+        });
+      })();
+    </script></div></div>`;
+  return shell('Add tip', body);
+}
+
+// ── Newsletter view ──────────────────────────────────────────────────
+/** One screen to manage the weekly issue: status, generate, preview, push, history, subscribers. */
+export async function adminNewsletter(env: Env): Promise<Response> {
+  const week = isoWeek();
+  const draft = await env.RAW_MEDIA.get(`digests/${week}.html`).catch(() => null);
+  const hasDraft = !!draft;
+  const pubs = (await env.DB.prepare(
+    `SELECT week, beehiiv_post_id, status, detail, created_at FROM digest_publications ORDER BY week DESC LIMIT 12`,
+  ).all<{ week: string; beehiiv_post_id: string | null; status: string; detail: string | null; created_at: string }>()).results ?? [];
+  const subTotal = (await env.DB.prepare(`SELECT COUNT(*) n FROM subscribers WHERE status='active'`).first<{ n: number }>())?.n ?? 0;
+  const subUnsynced = (await env.DB.prepare(`SELECT COUNT(*) n FROM subscribers WHERE status='active' AND beehiiv_synced_at IS NULL`).first<{ n: number }>())?.n ?? 0;
+  const beehiivOn = beehiivConfigured(env);
+  const wk = encodeURIComponent(week);
+  const thisWeekPub = pubs.find((p) => p.week === week);
+
+  const body = `<div class="app">${railNav('newsletter')}<div class="main">
+    <header class="topbar"><div class="search">${icon('mail', 15)}<span>Newsletter — ${escapeHtml(week)}</span></div>
+      <a href="/admin/subscribers" class="pill" style="text-decoration:none">Subscribers</a>
+      <button onclick="location.reload()">↻ Refresh</button></header>
+    <div class="content">
+
+      <div class="grid stats">
+        <div class="card"><div class="k">Active subscribers${tip('nl-subs')}</div><div class="v">${subTotal}</div><div class="sub">${subUnsynced ? `${subUnsynced} not synced to beehiiv` : 'all synced'}</div></div>
+        <div class="card"><div class="k">This week's draft</div><div class="v">${hasDraft ? 'ready' : '—'}</div><div class="sub">${hasDraft ? 'stored in R2' : 'not generated yet'}</div></div>
+        <div class="card"><div class="k">beehiiv</div><div class="v">${beehiivOn ? 'on' : 'off'}</div><div class="sub">${beehiivOn ? 'connected' : 'not configured — R2 draft only'}</div></div>
+        <div class="card"><div class="k">Pushed this week</div><div class="v">${thisWeekPub?.status === 'drafted' ? 'yes' : 'no'}</div><div class="sub">${thisWeekPub ? escapeHtml(thisWeekPub.status) : 'not pushed'}</div></div>
+      </div>
+
+      ${thisWeekPub?.status === 'failed' ? `<div class="panel" style="border-color:var(--bad);background:color-mix(in srgb, var(--bad) 6%, var(--card))"><b style="color:var(--bad)">Last beehiiv push failed${tip('nl-failed')}:</b> <span class="muted">${escapeHtml(thisWeekPub.detail || 'see ops events')}</span> — the issue is still in R2; preview it and paste into beehiiv manually.</div>` : ''}
+
+      <section class="card"><header><div><h3>This week — ${escapeHtml(week)}${tip('nl-actions')}</h3><p class="csub">Generation is automatic each week. Publishing creates a beehiiv DRAFT only — you review + send inside beehiiv.</p></div></header>
+        <div class="body"><div class="actions">
+          <button data-act="/admin/run-weekly?week=${wk}${hasDraft ? '&force=1' : ''}"${hasDraft ? ' data-confirm="Regenerate this week\'s draft? This re-runs the LLM (small budget cost) and overwrites the stored draft."' : ''}>${hasDraft ? 'Regenerate this week' : 'Generate this week'}</button>
+          ${hasDraft ? `<a class="btn ghost" href="/admin/digest?week=${wk}" target="_blank" rel="noopener">Preview draft ↗</a>` : ''}
+          <button class="ghost" data-act="/admin/publish-digest?week=${wk}" data-confirm="Create a beehiiv DRAFT for ${escapeHtml(week)}? It will NOT send — you review + send in beehiiv.">Push to beehiiv draft</button>
+          <button class="ghost" data-act="/admin/sync-subscribers">Sync subscribers${subUnsynced ? ` (${subUnsynced})` : ''}</button>
+        </div><pre id="out" class="muted" style="margin-top:12px">Drafting is budget-gated (~10¢) and runs the compliance gate; a blocked draft shows its reason here. beehiiv calls are free and never auto-send.</pre></div></section>
+
+      ${hasDraft ? `<section class="card"><header><div><h3>Preview — ${escapeHtml(week)}</h3><p class="csub">The stored draft, exactly as it would paste into beehiiv</p></div></header>
+        <div class="body"><iframe src="/admin/digest?week=${wk}" style="width:100%;height:540px;border:1px solid var(--line);border-radius:var(--r-md);background:#fff"></iframe></div></section>` : ''}
+
+      <section class="card"><header><div><h3>Publish history${tip('nl-history')}</h3><p class="csub">Last 12 issues</p></div></header>
+        <div class="body">${pubs.length === 0 ? '<p class="muted">No issues pushed to beehiiv yet.</p>' :
+          `<table><thead><tr><th>Week</th><th>Status</th><th>beehiiv post</th><th>When</th><th></th></tr></thead><tbody>
+          ${pubs.map((p) => `<tr>
+            <td><b>${escapeHtml(p.week)}</b></td>
+            <td>${p.status === 'drafted' ? '<span class="pill" style="color:var(--good);border-color:var(--good)">drafted ✓</span>' : `<span class="pill" style="background:var(--bad);color:#fff;border:none">failed</span> <span class="muted" style="font-size:.74rem">${escapeHtml((p.detail || '').slice(0, 60))}</span>`}</td>
+            <td class="mono muted" style="font-size:.72rem">${p.beehiiv_post_id ? escapeHtml(p.beehiiv_post_id) : '–'}</td>
+            <td class="mono muted" style="font-size:.72rem">${escapeHtml(p.created_at.slice(0, 16).replace('T', ' '))}</td>
+            <td><a href="/admin/digest?week=${encodeURIComponent(p.week)}" target="_blank" rel="noopener" class="mono muted" style="font-size:.74rem">view ↗</a></td>
+          </tr>`).join('')}</tbody></table>`}</div></section>
+    </div>${ACTION_SCRIPT}</div></div>`;
+  return shell('Newsletter', body);
+}
+
+// ── Subscribers view ─────────────────────────────────────────────────
+/** Read-only subscriber list + sync. */
+export async function adminSubscribers(env: Env): Promise<Response> {
+  const [agg] = (await env.DB.prepare(
+    `SELECT COUNT(*) total,
+            SUM(CASE WHEN status='active' THEN 1 ELSE 0 END) active,
+            SUM(CASE WHEN status='unsubscribed' THEN 1 ELSE 0 END) unsubscribed,
+            SUM(CASE WHEN status='active' AND beehiiv_synced_at IS NULL THEN 1 ELSE 0 END) unsynced
+       FROM subscribers`,
+  ).all<{ total: number; active: number; unsubscribed: number; unsynced: number }>()).results ?? [];
+  const recent = (await env.DB.prepare(
+    `SELECT email, source, status, beehiiv_synced_at, created_at FROM subscribers ORDER BY created_at DESC LIMIT 50`,
+  ).all<{ email: string; source: string | null; status: string; beehiiv_synced_at: string | null; created_at: string }>()).results ?? [];
+
+  const body = `<div class="app">${railNav('newsletter')}<div class="main">
+    <header class="topbar"><div class="search">${icon('users', 15)}<span>Subscribers</span></div>
+      <a href="/admin/newsletter" class="pill" style="text-decoration:none">← Newsletter</a>
+      <button onclick="location.reload()">↻ Refresh</button></header>
+    <div class="content">
+      <div class="grid stats">
+        <div class="card"><div class="k">Active</div><div class="v">${agg?.active ?? 0}</div><div class="sub">${agg?.total ?? 0} total</div></div>
+        <div class="card"><div class="k">Unsynced</div><div class="v">${agg?.unsynced ?? 0}</div><div class="sub">active, not in beehiiv</div></div>
+        <div class="card"><div class="k">Unsubscribed</div><div class="v">${agg?.unsubscribed ?? 0}</div><div class="sub">soft-removed</div></div>
+      </div>
+      <section class="card"><header><div><h3>Recent signups</h3><p class="csub">Latest 50</p></div></header>
+        <div class="body"><div class="actions" style="margin-bottom:12px"><button class="ghost" data-act="/admin/sync-subscribers">Sync now${agg?.unsynced ? ` (${agg.unsynced})` : ''}</button></div>
+        ${recent.length === 0 ? '<p class="muted">No subscribers yet.</p>' :
+          `<table><thead><tr><th>Email</th><th>Source</th><th>Status</th><th>Synced</th><th>Joined</th></tr></thead><tbody>
+          ${recent.map((s) => `<tr>
+            <td class="mono" style="font-size:.78rem">${escapeHtml(s.email)}</td>
+            <td class="muted" style="font-size:.78rem">${escapeHtml(s.source || '–')}</td>
+            <td>${s.status === 'active' ? '<span class="pill" style="color:var(--good);border-color:var(--good)">active</span>' : `<span class="pill">${escapeHtml(s.status)}</span>`}</td>
+            <td class="mono muted" style="font-size:.72rem">${s.beehiiv_synced_at ? '✓' : '–'}</td>
+            <td class="mono muted" style="font-size:.72rem">${escapeHtml(s.created_at.slice(0, 10))}</td>
+          </tr>`).join('')}</tbody></table>`}
+        <pre id="out" class="muted" style="margin-top:12px">Sync pushes active, not-yet-synced subscribers to beehiiv (bounded, also runs daily).</pre></div></section>
+    </div>${ACTION_SCRIPT}</div></div>`;
+  return shell('Subscribers', body);
 }

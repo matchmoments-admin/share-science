@@ -6,7 +6,7 @@
  *  - scheduled() : hourly = producers (RSS…); daily = open+value+rate; weekly = newsletter draft
  */
 import type { Env, TipIngestMessage } from './types.js';
-import { uid, nowISO, logOps, timingSafeEqual } from './lib/db.js';
+import { uid, nowISO, logOps, timingSafeEqual, isSafePublicUrl } from './lib/db.js';
 import { spentTodayCents, withinBudget, recordSpend, eodhdCallsToday, eodhdCallBudget } from './lib/usage.js';
 import { ingest, verifyHmac, type IngestInput } from './lib/ingest.js';
 import { extractTips } from './lib/extract.js';
@@ -23,7 +23,7 @@ import { pollPodcastSources } from './lib/producers/podcast.js';
 import { leaderboard, leaderboardJson, navJson, sourcePage, tipPage, securityPage, methodologyPage } from './lib/pages.js';
 import { landingPage, handleSubscribe, syncSubscribersToBeehiiv } from './lib/landing.js';
 import { generateAndStoreDigest, publishDigestToBeehiiv } from './lib/content.js';
-import { adminCookie, adminDashboard, adminApprovals, adminTrading, adminErrors, adminLoginPage, handleAdminLogin, handleAdminLogout } from './lib/admin.js';
+import { adminCookie, adminDashboard, adminApprovals, adminTrading, adminErrors, adminSources, adminAddTip, adminNewsletter, adminSubscribers, adminLoginPage, handleAdminLogin, handleAdminLogout } from './lib/admin.js';
 
 const EXTRACT_BUDGET_CENTS = 5; // headroom before an extraction call (multi-tip ≈ a few cents)
 const MAX_TIPS_PER_ITEM = 35; // covers a full multi-analyst episode (e.g. The Call ~13 stocks × 2); still bounded
@@ -106,11 +106,105 @@ async function handleIngestHuman(req: Request, env: Env): Promise<Response> {
     return json({ error: 'invalid_json' }, 400);
   }
   if (!body.source_id || !body.text) return json({ error: 'missing source_id or text' }, 400);
+  // detected_at is the look-ahead anchor (entry = first bar AFTER it). Defaulting to now() silently
+  // back-stamps a tip found after its publish date — so we keep the default for API compatibility but
+  // LOG it, making any today-stamped manual tip auditable. The admin form always sends a real date.
+  if (!body.detected_at) await logOps(env, 'warn', { at: 'ingest_human', warn: 'detected_at_defaulted_to_now', source_id: body.source_id });
   const r = await ingest(env, {
     source_id: body.source_id, source_type: 'human', text: body.text, url: body.url,
     detected_at: body.detected_at || nowISO(),
   });
   return json(r, r.ok ? 200 : 400);
+}
+
+/** Admin: create a source. Body: { name, home_url?, feed_url?, bluesky_did?, locale?, ingest_method }. */
+async function handleAddSource(req: Request, env: Env): Promise<Response> {
+  if (!authed(req, env)) return json({ error: 'unauthorized' }, 401);
+  let b: Record<string, string | undefined>;
+  try { b = (await req.json()) as Record<string, string>; } catch { return json({ error: 'invalid_json' }, 400); }
+
+  const name = (b.name || '').trim();
+  const method = (b.ingest_method || 'manual').trim();
+  const ALLOWED = ['rss_fulltext', 'podcast_transcript', 'bluesky', 'manual'];
+  if (!name) return json({ error: 'missing name' }, 400);
+  if (!ALLOWED.includes(method)) return json({ error: 'bad ingest_method' }, 400);
+  if ((method === 'rss_fulltext' || method === 'podcast_transcript') && !b.feed_url) return json({ error: 'feed_url required for this method' }, 400);
+  if (method === 'bluesky' && !b.bluesky_did) return json({ error: 'bluesky_did required for bluesky' }, 400);
+  if (b.feed_url && !/^https:\/\//.test(b.feed_url)) return json({ error: 'feed_url must be https' }, 400);
+  if (b.home_url && !/^https?:\/\//.test(b.home_url)) return json({ error: 'home_url must be http(s)' }, 400);
+
+  const id = uid();
+  const medium = method === 'bluesky' ? 'bluesky' : method === 'podcast_transcript' ? 'podcast' : method === 'rss_fulltext' ? 'blog' : 'web';
+  try {
+    await env.DB.prepare(
+      `INSERT INTO sources (id, name, medium, home_url, created_at, feed_url, bluesky_did, locale, ingest_method, tos_checked, active)
+       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, 0, 1)`,
+    ).bind(id, name, medium, b.home_url ?? null, nowISO(), b.feed_url ?? null, b.bluesky_did ?? null, b.locale ?? null, method).run();
+  } catch (err) {
+    return json({ error: 'insert_failed', detail: String(err) }, 400);
+  }
+  await logAdmin(env, '/admin/add-source', { id, method });
+  return json({ ok: true, id });
+}
+
+/** Admin: pause/resume a source (active flag). */
+async function handleToggleSource(req: Request, env: Env): Promise<Response> {
+  if (!authed(req, env)) return json({ error: 'unauthorized' }, 401);
+  const u = new URL(req.url);
+  const id = u.searchParams.get('id');
+  const active = u.searchParams.get('active') === '1' ? 1 : 0;
+  if (!id) return json({ error: 'missing ?id=' }, 400);
+  const r = await env.DB.prepare('UPDATE sources SET active=? WHERE id=?').bind(active, id).run();
+  await logAdmin(env, '/admin/toggle-source', { id, active });
+  return json({ ok: !!r.meta.changes, id, active });
+}
+
+/** Admin: best-effort RSS/Atom discovery for a page URL (SSRF-guarded). Never blocks source creation. */
+async function handleFindFeed(req: Request, env: Env): Promise<Response> {
+  if (!authed(req, env)) return json({ error: 'unauthorized' }, 401);
+  let url = '';
+  try { url = (((await req.json()) as { url?: string }).url || '').trim(); } catch { return json({ error: 'invalid_json' }, 400); }
+  if (!url) return json({ error: 'missing url' }, 400);
+  // Upgrade http→https before validating (the guard + the output filter are https-only anyway).
+  url = url.replace(/^http:\/\//i, 'https://');
+  if (!/^https?:\/\//i.test(url)) url = `https://${url}`;
+  if (!isSafePublicUrl(url)) return json({ error: 'unsafe_url' }, 400);
+
+  // Follow redirects MANUALLY, re-running the SSRF guard on every hop — a guard-passing URL could
+  // 30x to a private/internal host, which the default redirect:'follow' would reach unchecked.
+  // Bounded hops + an 8s timeout so a slow/hung host can't pin the invocation.
+  let html = '';
+  try {
+    let target = url;
+    for (let hop = 0; hop < 4; hop++) {
+      const resp = await fetch(target, { redirect: 'manual', signal: AbortSignal.timeout(8000), headers: { 'user-agent': 'shareo/0.1 (+https://shareo.co)' } });
+      if (resp.status >= 300 && resp.status < 400) {
+        const loc = resp.headers.get('location');
+        if (!loc) break;
+        target = new URL(loc, target).toString();
+        if (!isSafePublicUrl(target)) return json({ ok: true, feeds: [], note: 'unsafe_redirect' });
+        continue; // re-fetch the validated redirect target
+      }
+      if (!resp.ok) return json({ ok: true, feeds: [], note: `fetch ${resp.status}` });
+      if (Number(resp.headers.get('content-length') || 0) > 2_000_000) return json({ ok: true, feeds: [], note: 'too_large' });
+      html = (await resp.text()).slice(0, 200_000); // bound the parse
+      break;
+    }
+  } catch (err) {
+    return json({ ok: true, feeds: [], note: String(err) });
+  }
+  const feeds = new Set<string>();
+  const linkTags = html.match(/<link\b[^>]*>/gi) ?? [];
+  for (const tag of linkTags) {
+    const isFeed = /type=["']application\/(rss|atom)\+xml["']/i.test(tag) ||
+      (/rel=["'][^"']*alternate[^"']*["']/i.test(tag) && /(rss|atom|feed)/i.test(tag));
+    if (!isFeed) continue;
+    const href = tag.match(/href=["']([^"']+)["']/i)?.[1];
+    if (!href) continue;
+    try { feeds.add(new URL(href, url).toString()); } catch { /* skip bad href */ }
+  }
+  const out = [...feeds].filter((f) => /^https:\/\//i.test(f)).slice(0, 5);
+  return json({ ok: true, feeds: out, note: out.length ? undefined : 'no <link rel=alternate> feed found — paste the feed URL manually' });
 }
 
 /** Producer endpoint for out-of-Worker producers. HMAC over the raw body via INGEST_HMAC_SECRET. */
@@ -335,6 +429,13 @@ export default {
     if (url.pathname === '/admin/approvals' && req.method === 'GET') return authed(req, env) ? adminApprovals(env) : adminLoginPage();
     if (url.pathname === '/admin/trading' && req.method === 'GET') return authed(req, env) ? adminTrading(env) : adminLoginPage();
     if (url.pathname === '/admin/errors' && req.method === 'GET') return authed(req, env) ? adminErrors(env) : adminLoginPage();
+    if (url.pathname === '/admin/sources' && req.method === 'GET') return authed(req, env) ? adminSources(env) : adminLoginPage();
+    if (url.pathname === '/admin/add-tip' && req.method === 'GET') return authed(req, env) ? adminAddTip(env) : adminLoginPage();
+    if (url.pathname === '/admin/newsletter' && req.method === 'GET') return authed(req, env) ? adminNewsletter(env) : adminLoginPage();
+    if (url.pathname === '/admin/subscribers' && req.method === 'GET') return authed(req, env) ? adminSubscribers(env) : adminLoginPage();
+    if (url.pathname === '/admin/add-source' && req.method === 'POST') return handleAddSource(req, env);
+    if (url.pathname === '/admin/toggle-source' && req.method === 'POST') return handleToggleSource(req, env);
+    if (url.pathname === '/admin/find-feed' && req.method === 'POST') return handleFindFeed(req, env);
     // Trade approval + brokerage controls (mutations).
     if (url.pathname === '/admin/approve-trade' && req.method === 'POST') return handleApproveTrade(req, env);
     if (url.pathname === '/admin/reject-trade' && req.method === 'POST') return handleRejectTrade(req, env);
