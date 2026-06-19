@@ -22,6 +22,7 @@ routes = [
 [vars]
 PUBLIC_PRICES = "off"
 MAX_DAILY_COST_CENTS = "500"
+EXTRACT_MODEL = "claude-haiku-4-5"  # extraction + digest model. Haiku 4.5 ($1/$5 per 1M) ≈ 5x cheaper than Opus 4.8 ($5/$25); extraction is a strict structured tool-call so quality risk is low.
 ALPACA_MODE = "paper"      # off | paper | live  — paper-api.alpaca.markets (simulated, no real money)
 ALPACA_NOTIONAL_USD = "5"  # $ per real buy (hard-capped at $50 in code)
 # Turnstile: set the public site key here to render the /api/subscribe widget, and
