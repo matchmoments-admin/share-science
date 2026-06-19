@@ -50,12 +50,46 @@ async function handleHealthz(env: Env): Promise<Response> {
   } catch {
     dbOk = false;
   }
+  // Newsletter funnel health (Phase 1 observability). Best-effort — never fails the probe.
+  let newsletter: unknown = null;
+  if (dbOk) {
+    try {
+      const lastDigest = await env.DB.prepare(
+        `SELECT week, status, beehiiv_post_id, sent_at, created_at FROM digest_publications ORDER BY week DESC LIMIT 1`,
+      ).first<{ week: string; status: string; beehiiv_post_id: string | null; sent_at: string | null; created_at: string }>();
+      const subs = await env.DB.prepare(
+        `SELECT
+           SUM(CASE WHEN status='active' THEN 1 ELSE 0 END) active,
+           SUM(CASE WHEN status='pending' THEN 1 ELSE 0 END) pending,
+           SUM(CASE WHEN status='unsubscribed' THEN 1 ELSE 0 END) unsubscribed,
+           SUM(CASE WHEN status='active' AND beehiiv_synced_at IS NULL THEN 1 ELSE 0 END) active_unsynced
+         FROM subscribers`,
+      ).first<{ active: number; pending: number; unsubscribed: number; active_unsynced: number }>();
+      newsletter = {
+        last_digest_week: lastDigest?.week ?? null,
+        draft_status: lastDigest?.status ?? null, // 'drafted' | 'failed' | 'sent'
+        beehiiv_post_id: lastDigest?.beehiiv_post_id ?? null,
+        last_sent_at: lastDigest?.sent_at ?? null, // NULL until Phase 2 wires send-state
+        subscribers: {
+          active: subs?.active ?? 0,
+          pending: subs?.pending ?? 0, // 0 until Phase 4 double opt-in
+          unsubscribed: subs?.unsubscribed ?? 0,
+          active_unsynced: subs?.active_unsynced ?? 0,
+        },
+        // D1 is the CAPTURE record; beehiiv→D1 reconciliation lands in Phase 5, so active may over-count.
+        list_note: 'D1 capture (pre-reconciliation)',
+      };
+    } catch {
+      newsletter = null;
+    }
+  }
   return json({
     status: dbOk ? 'ok' : 'degraded',
     service: 'share-science',
     public_prices: env.PUBLIC_PRICES,
     spend_today_cents: await spentTodayCents(env).catch(() => null),
     daily_cap_cents: Number(env.MAX_DAILY_COST_CENTS) || null,
+    newsletter,
     time: nowISO(),
   });
 }

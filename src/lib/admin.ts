@@ -94,6 +94,9 @@ const TIP: Record<string, string> = {
   'dim:horizon:365': 'Ranking that judges each tip 365 days after it was made — the strongest long-term signal, but the slowest to fill.',
   'dim:primary': "Judges each tip at the timeframe the sharer intended (the settled window nearest its stated horizon). Tips whose intended window hasn't settled are skipped. The fairest single ranking.",
   'dim:conviction:90': 'A 90-day ranking where higher-conviction tips count for more (high=3, medium=2, low=1) in Hit and Alpha. The Score stays on the raw unweighted sample, so labelling everything high-conviction cannot manufacture statistical confidence.',
+  // newsletter
+  'newsletter-panel': "The weekly issue's publish state: was this week's digest generated, was a beehiiv DRAFT created (or did it 403), and has it been sent. Nothing auto-sends — you click Send in beehiiv. Subscriber counts are the D1 capture record; beehiiv→D1 reconciliation lands later, so 'active' may over-count until then.",
+  'newsletter-failed': 'The beehiiv draft API returned an error (it is Enterprise-beta and may 403). The generated issue is still saved — open the preview, copy the HTML, and paste it into a new beehiiv post manually.',
   // activity
   'activity-feed': "The 7 most recent ops events, newest first, with errors in red. This is the only in-UI place to read error detail — check it when 'Needs attention' flags Errors.",
   // approvals / trading
@@ -415,6 +418,12 @@ export async function adminDashboard(env: Env): Promise<Response> {
   const ratings = await rows<{ dimension: string; source_name: string; tier: string; n_tips: number; hit_rate: number; avg_excess_pct: number; score_lower: number; rank: number }>(env,
     `SELECT sr.dimension, s.name source_name, sr.tier, sr.n_tips, sr.hit_rate, sr.avg_excess_pct, sr.score_lower, sr.rank FROM source_ratings sr JOIN sources s ON s.id=sr.source_id ORDER BY sr.dimension, sr.rank LIMIT 80`);
   const ops = await rows<{ kind: string; created_at: string; detail: string }>(env, `SELECT kind, created_at, substr(detail,1,90) detail FROM ops_events ORDER BY created_at DESC LIMIT 7`);
+  // Newsletter funnel state (Phase 1 observability).
+  const lastDigest = await env.DB.prepare(
+    `SELECT week, status, beehiiv_post_id, sent_at, created_at, substr(detail,1,160) detail FROM digest_publications ORDER BY week DESC LIMIT 1`,
+  ).first<{ week: string; status: string; beehiiv_post_id: string | null; sent_at: string | null; created_at: string; detail: string | null }>().catch(() => null);
+  const [subBreak] = await rows<{ active: number; pending: number; unsubscribed: number }>(env,
+    `SELECT SUM(CASE WHEN status='active' THEN 1 ELSE 0 END) active, SUM(CASE WHEN status='pending' THEN 1 ELSE 0 END) pending, SUM(CASE WHEN status='unsubscribed' THEN 1 ELSE 0 END) unsubscribed FROM subscribers`);
 
   const pendingLive = (await env.DB.prepare(`SELECT COUNT(*) n FROM trade_intents WHERE status='proposed'`).first<{ n: number }>())?.n ?? 0;
   const brokerMode = await alpacaMode(env);
@@ -556,6 +565,27 @@ export async function adminDashboard(env: Env): Promise<Response> {
               <span class="mono" style="font-size:10px;color:rgba(255,255,255,.45)">${escapeHtml(o.created_at.slice(11, 16))}</span></div>`).join('')}</div></section>
         </div>
 
+        <!-- NEWSLETTER -->
+        ${(() => {
+          const st = lastDigest?.status ?? 'none';
+          const tone = st === 'sent' ? 'var(--good)' : st === 'drafted' ? '#c98a00' : st === 'failed' ? 'var(--bad)' : 'var(--faint)';
+          const label = st === 'none' ? 'no issue yet' : st === 'drafted' ? 'draft created' : st;
+          return `<section class="card" id="newsletter"><header><div><h3>Newsletter${tip('newsletter-panel')}</h3><p class="csub">Weekly issue publish state &amp; subscriber funnel</p></div>
+            <span class="pill" style="background:${tone};color:#fff;border:none">${escapeHtml(label)}</span></header>
+            <div class="body">
+              <div style="display:flex;gap:26px;flex-wrap:wrap;font-size:13px;color:var(--muted);margin-bottom:4px">
+                <span><b style="color:var(--text);font-family:var(--font-mono)">${escapeHtml(lastDigest?.week ?? '—')}</b> latest issue</span>
+                <span><b style="color:var(--text);font-family:var(--font-mono)">${subBreak?.active ?? 0}</b> active${subBreak?.pending ? ` · ${subBreak.pending} pending` : ''}${subBreak?.unsubscribed ? ` · ${subBreak.unsubscribed} unsub` : ''}</span>
+                <span><b style="color:var(--text);font-family:var(--font-mono)">${unsynced?.n ?? 0}</b> not synced to beehiiv</span>
+                <span><b style="color:var(--text);font-family:var(--font-mono)">${lastDigest?.sent_at ? escapeHtml(lastDigest.sent_at.slice(0, 10)) : '—'}</b> last sent</span>
+              </div>
+              ${lastDigest?.beehiiv_post_id ? `<p class="muted" style="font-size:12px;margin:0 0 8px">beehiiv post id: <span class="mono">${escapeHtml(lastDigest.beehiiv_post_id)}</span></p>` : ''}
+              ${st === 'failed' ? `<div class="panel" style="border-color:var(--bad);background:color-mix(in srgb, var(--bad) 6%, var(--card));padding:12px 14px;margin:4px 0"><b style="color:var(--bad)">beehiiv draft failed${tip('newsletter-failed')}:</b> <span class="muted" style="font-size:12px">${escapeHtml(lastDigest?.detail || 'see ops events')}</span> — the issue is still saved; open the preview and paste it into beehiiv manually.</div>` : ''}
+              <div class="actions" style="margin-top:8px">
+                ${lastDigest?.week ? `<a href="/admin/digest?week=${encodeURIComponent(lastDigest.week)}" target="_blank" rel="noopener" style="text-decoration:none;display:inline-block;font-weight:600;padding:9px 16px;border-radius:var(--r-pill);background:var(--card);color:var(--text);border:1px solid var(--line)">Preview latest issue →</a>` : '<span class="muted" style="font-size:13px">No issue generated yet — use “Generate weekly digest” below.</span>'}
+              </div>
+            </div></section>`;
+        })()}
         <!-- JOBS -->
         <section class="card" id="jobs"><header><div><h3>Run a job${tip('jobs-section')}</h3><p class="csub">Spend today: $${(spent / 100).toFixed(2)} / $${(cap / 100).toFixed(0)} · ${spendLabel}${tip('jobs-spend')}</p></div></header>
           <div class="body"><div class="actions">
