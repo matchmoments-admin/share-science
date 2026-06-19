@@ -122,7 +122,18 @@ export async function draftDigest(env: Env, pack: FactsPack): Promise<{ text: st
 }
 
 /** Assemble → draft → assertFactual → store HTML in R2. Returns the stored key + verdict. */
-export async function generateAndStoreDigest(env: Env, week = isoWeek()): Promise<{ ok: boolean; week: string; key?: string; reason?: string }> {
+export async function generateAndStoreDigest(env: Env, week = isoWeek(), force = false): Promise<{ ok: boolean; week: string; key?: string; reason?: string }> {
+  const key = `digests/${week}.html`;
+  // Idempotent per week: if this week's draft already exists, return it WITHOUT re-paying for an
+  // identical Opus/Haiku draft. The weekly cron, /admin/run-weekly, and any re-run all hit the cache.
+  // Pass force=true (e.g. ?force=1) to deliberately regenerate after more outcomes settle.
+  if (!force) {
+    const existing = await env.RAW_MEDIA.head(key);
+    if (existing) {
+      await logOps(env, 'publish', { week, key, skipped: 'already_drafted' });
+      return { ok: true, week, key, reason: 'cached' };
+    }
+  }
   if (!(await withinBudget(env, DRAFT_BUDGET_CENTS))) {
     await logOps(env, 'publish', { skipped: 'over_budget', week });
     return { ok: false, week, reason: 'over_budget' };
@@ -138,7 +149,6 @@ export async function generateAndStoreDigest(env: Env, week = isoWeek()): Promis
   }
   assertFactual(text); // belt-and-suspenders
 
-  const key = `digests/${week}.html`;
   const html = `<!doctype html><meta charset="utf-8"><title>share-science ${week}</title>` +
     `<article style="font:16px/1.6 system-ui;max-width:680px;margin:2rem auto">` +
     text.split('\n').map((p) => (p.trim() ? `<p>${p.replace(/&/g, '&amp;').replace(/</g, '&lt;')}</p>` : '')).join('') +

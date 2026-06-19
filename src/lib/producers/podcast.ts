@@ -55,7 +55,7 @@ export async function pollPodcastSources(env: Env): Promise<{ sources: number; e
         }
         if (await alreadyIngested(env, s.id, key)) continue; // dedup BEFORE paying Deepgram
         if (!(await withinBudget(env, RESERVE_CENTS))) {
-          await logOps(env, 'publish', { at: 'pollPodcastSources', skipped: 'over_budget', source: s.id });
+          await logOps(env, 'extract', { at: 'pollPodcastSources', skipped: 'over_budget', source: s.id });
           budget = 0;
           break;
         }

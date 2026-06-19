@@ -168,7 +168,9 @@ async function handleRunDaily(req: Request, env: Env): Promise<Response> {
 
 async function handleRunWeekly(req: Request, env: Env): Promise<Response> {
   if (!authed(req, env)) return json({ error: 'unauthorized' }, 401);
-  return json(await generateAndStoreDigest(env));
+  const url = new URL(req.url);
+  // Idempotent by default (returns the cached draft, no LLM spend); ?force=1 deliberately regenerates.
+  return json(await generateAndStoreDigest(env, url.searchParams.get('week') || undefined, url.searchParams.get('force') === '1'));
 }
 
 async function handleDigest(req: Request, env: Env): Promise<Response> {
