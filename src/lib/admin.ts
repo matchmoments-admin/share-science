@@ -104,6 +104,7 @@ const TIP: Record<string, string> = {
   'src-list': 'Every source. Pause sets active=0 so the cron stops polling it without deleting history; resume re-enables it.',
   'src-tos': 'The hard ToS gate: an auto-poll source is only ever polled once you have verified its terms of service allow this use and clicked "Mark ToS-checked" (which records who/when/note). Unchecked auto-sources are NOT polled — by design.',
   'src-health': 'Per-source poll health, set by the cron. "ok" + date = last successful fetch; "failing ×N" = N consecutive failed polls (hover for the error) — a dead feed to fix or retire. "Tips" shows lifetime tips and the % that abstained (couldn’t resolve a security).',
+  'src-from': 'Forward-only anchor: the source only ingests items published on/after this date (stamped when you ToS-check it), so a new source never pulls its whole back-catalogue. Use Backfill (30d/90d/1y) to deliberately pull bounded history — it ingests + scores past tips look-ahead-free. Podcast backfill transcribes past episodes via Deepgram ($), paced by the daily budget.',
   'tip-add': 'Submits to the same /ingest/human seam the automated pollers use: Claude extracts the call, resolve.ts matches the security (or abstains → review queue), and the daily pass opens a paper position at the first market bar AFTER the publish date.',
   'tip-date': 'The REAL publication date of the tip — this is the look-ahead anchor. Entry price is the first market bar strictly after it, so back-dating to today would fabricate a same-day entry. Rejected if in the future or older than ~3 years.',
   // newsletter
@@ -851,6 +852,7 @@ export async function adminTrading(env: Env): Promise<Response> {
 interface SourceRow {
   id: string; name: string; medium: string; feed_url: string | null; bluesky_did: string | null;
   ingest_method: string; active: number | null; tos_checked: number | null; tos_checked_at: string | null;
+  ingest_from: string | null;
   last_success_at: string | null; last_error: string | null; consecutive_failures: number | null;
   tips: number; review: number;
 }
@@ -859,7 +861,7 @@ interface SourceRow {
 export async function adminSources(env: Env): Promise<Response> {
   const sources = (await env.DB.prepare(
     `SELECT s.id, s.name, s.medium, s.feed_url, s.bluesky_did, s.ingest_method, s.active,
-            s.tos_checked, s.tos_checked_at, s.last_success_at, s.last_error, s.consecutive_failures,
+            s.tos_checked, s.tos_checked_at, s.ingest_from, s.last_success_at, s.last_error, s.consecutive_failures,
             COUNT(t.id) tips, SUM(CASE WHEN t.status='review' THEN 1 ELSE 0 END) review
        FROM sources s LEFT JOIN tips t ON t.source_id = s.id
       GROUP BY s.id ORDER BY (s.active IS NULL OR s.active=1) DESC, s.name LIMIT 200`,
@@ -891,12 +893,12 @@ export async function adminSources(env: Env): Promise<Response> {
             <div class="field"><label>Locale</label><input id="s-locale" placeholder="AU | US | UK | CA"></div>
           </div>
           <button id="s-submit">Add source</button>
-          <pre id="out" class="muted" style="margin-top:12px">tos_checked defaults to 0 — verify each feed's terms before relying on it.</pre>
+          <pre id="out" class="muted" style="margin-top:12px">Verify each feed's terms, then Mark ToS-checked to start polling. New sources ingest only items published after you start them — use Backfill for bounded history.</pre>
         </div></section>
 
       <section class="card"><header><div><h3>Sources${tip('src-list')}</h3><p class="csub">${sources.length} total · ToS-check to enable polling · pause to stop without deleting</p></div></header>
         <div class="body">${sources.length === 0 ? '<p class="muted">No sources yet.</p>' :
-          `<table><thead><tr><th>Name</th><th>Method</th><th>ToS${tip('src-tos')}</th><th>Health${tip('src-health')}</th><th class="num">Tips</th><th>Status</th><th></th></tr></thead><tbody>
+          `<table><thead><tr><th>Name</th><th>Method</th><th>ToS${tip('src-tos')}</th><th>Health${tip('src-health')}</th><th class="num">Tips</th><th>From${tip('src-from')}</th><th>Status</th><th></th></tr></thead><tbody>
           ${sources.map((s) => {
             const on = s.active == null || s.active === 1;
             const auto = autoMethods.has(s.ingest_method);
@@ -919,6 +921,7 @@ export async function adminSources(env: Env): Promise<Response> {
               <td>${tosCell}${auto && !tosOk ? ` <button class="ghost" data-tos="${encodeURIComponent(s.id)}" style="padding:5px 9px;font-size:.74rem">Mark ToS-checked</button>` : ''}</td>
               <td>${health}</td>
               <td class="num">${tips}${tips && abstainPct ? ` <span class="muted" style="font-size:.7rem">${abstainPct}% abst</span>` : ''}</td>
+              <td>${!auto ? '<span class="muted" style="font-size:.74rem">—</span>' : `<span class="mono muted" style="font-size:.7rem">${s.ingest_from ? 'from ' + escapeHtml(s.ingest_from.slice(0, 10)) : 'all history'}</span>${tosOk ? `<div style="margin-top:4px;display:flex;gap:4px">${['30', '90', '365'].map((d) => `<button class="ghost" data-backfill="${encodeURIComponent(s.id)}" data-days="${d}"${s.ingest_method === 'podcast_transcript' ? ' data-pod="1"' : ''} style="padding:4px 7px;font-size:.7rem">${d === '365' ? '1y' : d + 'd'}</button>`).join('')}</div>` : ''}`}</td>
               <td>${on ? '<span class="pill" style="color:var(--good);border-color:var(--good)">active</span>' : '<span class="pill">paused</span>'}</td>
               <td>${on
                 ? `<button class="ghost" data-toggle="/admin/toggle-source?id=${encodeURIComponent(s.id)}&active=0">Pause</button>`
@@ -943,6 +946,19 @@ export async function adminSources(env: Env): Promise<Response> {
             if(note===null) return; // cancelled
             b.disabled=true; out.textContent='Recording ToS check…';
             fetch('/admin/set-tos?id='+b.getAttribute('data-tos')+'&note='+encodeURIComponent(note),{method:'POST'})
+              .then(function(r){return r.json();})
+              .then(function(j){ if(j.ok){ location.reload(); } else { b.disabled=false; out.textContent='Error: '+(j.error||'failed'); } })
+              .catch(function(e){ b.disabled=false; out.textContent='Error: '+e; });
+          });
+        });
+        document.querySelectorAll('button[data-backfill]').forEach(function(b){
+          b.addEventListener('click', function(){
+            var days=b.getAttribute('data-days');
+            var msg='Backfill the last '+days+' days for this source? It ingests + scores past tips (look-ahead-free).';
+            if(b.getAttribute('data-pod')) msg='Backfill '+days+' days of PODCAST episodes? This transcribes them via Deepgram ($ — paced by the daily budget). Continue?';
+            if(!confirm(msg)) return;
+            b.disabled=true; out.textContent='Setting backfill window…';
+            fetch('/admin/backfill-source?id='+b.getAttribute('data-backfill')+'&days='+days,{method:'POST'})
               .then(function(r){return r.json();})
               .then(function(j){ if(j.ok){ location.reload(); } else { b.disabled=false; out.textContent='Error: '+(j.error||'failed'); } })
               .catch(function(e){ b.disabled=false; out.textContent='Error: '+e; });

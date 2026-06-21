@@ -28,6 +28,9 @@ track record looks bad (that would be cherry-picking and destroys the empirical 
 4. **Activate** — once ToS-checked, the hourly cron polls it automatically.
 5. **Review** — watch per-source **health** (failing feeds), **tip volume**, and **abstain rate** on `/admin/sources`. Retire only for a non-performance reason (dead feed, ToS change, off-topic, deletion request) — settled history is preserved.
 
+### Ingestion window (forward-only by default)
+A source ingests **only items published after you start it** (`ingest_from`, stamped at ToS-check) — so adding a source never pulls its whole back-catalogue (critical for podcasts: no Deepgram on the archive). Historical tips ARE scored correctly (look-ahead-free, up to the 3-year `checkDetectedAt` window), so when a track record is worth seeding, use the per-source **Backfill** (30/90/365 days): it moves `ingest_from` back and the normal poller fills the window, paced by the per-run caps + the daily budget. Podcast backfill is confirm-gated for its Deepgram cost.
+
 ## Visibility floor
 A source appears on the **public leaderboard** only after **≥5 settled tips** (`MIN_PUBLIC_TIPS`). The
 Wilson lower-bound score already discounts small samples; this floor prevents a noisy public debut on

@@ -23,11 +23,12 @@ export interface RssItem {
 interface RssSource {
   id: string;
   feed_url: string;
+  ingest_from?: string | null;
 }
 
 export async function pollRssSources(env: Env): Promise<{ feeds: number; items: number; ingested: number }> {
   const sources = (await env.DB.prepare(
-    `SELECT id, feed_url FROM sources WHERE active = 1 AND tos_checked = 1 AND ingest_method = 'rss_fulltext' AND feed_url IS NOT NULL
+    `SELECT id, feed_url, ingest_from FROM sources WHERE active = 1 AND tos_checked = 1 AND ingest_method = 'rss_fulltext' AND feed_url IS NOT NULL
       ORDER BY last_cursor ASC LIMIT ?`,
   ).bind(MAX_FEEDS_PER_RUN).all<RssSource>()).results ?? [];
 
@@ -41,6 +42,7 @@ export async function pollRssSources(env: Env): Promise<{ feeds: number; items: 
         const text = `${it.title}\n\n${stripHtml(it.content)}`.trim();
         const detected_at = toISO(it.pubDate);
         if (!text || !detected_at) continue;
+        if (s.ingest_from && detected_at < s.ingest_from) continue; // forward-only / backfill window
         const r = await ingest(env, { source_id: s.id, source_type: 'blog', text, url: it.link, detected_at });
         if (r.ok && !r.duplicate) ingested++;
       }

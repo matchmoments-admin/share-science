@@ -155,11 +155,30 @@ async function handleSetTos(req: Request, env: Env): Promise<Response> {
   if (!id) return json({ error: 'missing ?id=' }, 400);
   const checked = u.searchParams.get('checked') === '0' ? 0 : 1;
   const note = (u.searchParams.get('note') || '').slice(0, 300);
+  // Starting a source anchors forward-only ingestion at this moment (COALESCE so a backfill window
+  // already set is never clobbered). detected_at < ingest_from items are skipped by the pollers.
   const r = await env.DB.prepare(
-    'UPDATE sources SET tos_checked=?, tos_checked_at=?, tos_checked_by=?, tos_note=? WHERE id=?',
-  ).bind(checked, checked ? nowISO() : null, checked ? 'admin' : null, note || null, id).run();
+    'UPDATE sources SET tos_checked=?, tos_checked_at=?, tos_checked_by=?, tos_note=?, ingest_from=COALESCE(ingest_from, ?) WHERE id=?',
+  ).bind(checked, checked ? nowISO() : null, checked ? 'admin' : null, note || null, checked ? nowISO() : null, id).run();
   await logAdmin(env, '/admin/set-tos', { id, checked });
   return json({ ok: !!r.meta.changes, id, tos_checked: checked });
+}
+
+/** Admin: backfill a bounded history window for a source by moving ingest_from back N days. The
+ * normal poller then fills it, paced by per-run caps + the daily budget. N clamped + floored at 3y. */
+async function handleBackfillSource(req: Request, env: Env): Promise<Response> {
+  if (!authed(req, env)) return json({ error: 'unauthorized' }, 401);
+  const u = new URL(req.url);
+  const id = u.searchParams.get('id');
+  if (!id) return json({ error: 'missing ?id=' }, 400);
+  const ALLOWED = new Set([30, 90, 365]);
+  const days = Number(u.searchParams.get('days'));
+  if (!ALLOWED.has(days)) return json({ error: 'days must be 30, 90 or 365' }, 400);
+  // Never older than ~3y (checkDetectedAt rejects older anyway) — days is already <= 365 so this is safe.
+  const from = new Date(Date.now() - days * 86_400_000).toISOString();
+  const r = await env.DB.prepare('UPDATE sources SET ingest_from=? WHERE id=?').bind(from, id).run();
+  await logAdmin(env, '/admin/backfill-source', { id, days });
+  return json({ ok: !!r.meta.changes, id, ingest_from: from });
 }
 
 /** Admin: pause/resume a source (active flag). */
@@ -451,6 +470,7 @@ export default {
     if (url.pathname === '/admin/add-source' && req.method === 'POST') return handleAddSource(req, env);
     if (url.pathname === '/admin/toggle-source' && req.method === 'POST') return handleToggleSource(req, env);
     if (url.pathname === '/admin/set-tos' && req.method === 'POST') return handleSetTos(req, env);
+    if (url.pathname === '/admin/backfill-source' && req.method === 'POST') return handleBackfillSource(req, env);
     if (url.pathname === '/admin/find-feed' && req.method === 'POST') return handleFindFeed(req, env);
     // Trade approval + brokerage controls (mutations).
     if (url.pathname === '/admin/approve-trade' && req.method === 'POST') return handleApproveTrade(req, env);

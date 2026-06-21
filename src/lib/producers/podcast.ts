@@ -20,13 +20,14 @@ const DEEPGRAM_CENTS_PER_MIN = 0.43; // Nova-3 pay-as-you-go ≈ $0.0043/min
 interface PodSource {
   id: string;
   feed_url: string;
+  ingest_from?: string | null;
 }
 
 export async function pollPodcastSources(env: Env): Promise<{ sources: number; episodes: number; ingested: number; skipped?: string }> {
   if (!env.DEEPGRAM_API_KEY) return { sources: 0, episodes: 0, ingested: 0, skipped: 'no_deepgram_key' };
 
   const sources = (await env.DB.prepare(
-    `SELECT id, feed_url FROM sources
+    `SELECT id, feed_url, ingest_from FROM sources
       WHERE active = 1 AND tos_checked = 1 AND ingest_method = 'podcast_transcript' AND feed_url IS NOT NULL
       ORDER BY last_cursor ASC LIMIT ?`,
   ).bind(MAX_PODCASTS_PER_RUN).all<PodSource>()).results ?? [];
@@ -55,6 +56,8 @@ export async function pollPodcastSources(env: Env): Promise<{ sources: number; e
           await logOps(env, 'error', { at: 'pollPodcastSources', source: s.id, err: 'unparseable_pubDate' });
           continue;
         }
+        // Forward-only / backfill window — skip old episodes BEFORE paying Deepgram (the core cost win).
+        if (s.ingest_from && detected_at < s.ingest_from) continue;
         if (await alreadyIngested(env, s.id, key)) continue; // dedup BEFORE paying Deepgram
         if (!(await withinBudget(env, RESERVE_CENTS))) {
           await logOps(env, 'extract', { at: 'pollPodcastSources', skipped: 'over_budget', source: s.id });

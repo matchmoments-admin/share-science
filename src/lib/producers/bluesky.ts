@@ -14,6 +14,7 @@ const MAX_ITEMS_PER_SOURCE = 15;
 interface BskySource {
   id: string;
   bluesky_did: string;
+  ingest_from?: string | null;
 }
 
 interface FeedPost {
@@ -27,7 +28,7 @@ interface FeedPost {
 
 export async function pollBlueskySources(env: Env): Promise<{ sources: number; items: number; ingested: number }> {
   const sources = (await env.DB.prepare(
-    `SELECT id, bluesky_did FROM sources
+    `SELECT id, bluesky_did, ingest_from FROM sources
       WHERE active = 1 AND tos_checked = 1 AND ingest_method = 'bluesky' AND bluesky_did IS NOT NULL
       ORDER BY last_cursor ASC LIMIT ?`,
   ).bind(MAX_SOURCES_PER_RUN).all<BskySource>()).results ?? [];
@@ -42,10 +43,12 @@ export async function pollBlueskySources(env: Env): Promise<{ sources: number; i
         // own original posts only — skip reposts (have a `reason`) and other-author items.
         if (fp.reason || !p?.record?.text || !p.record.createdAt) continue;
         if (p.author?.did && p.author.did !== s.bluesky_did) continue;
+        const detected_at = new Date(p.record.createdAt).toISOString();
+        if (s.ingest_from && detected_at < s.ingest_from) continue; // forward-only / backfill window
         items++;
         const r = await ingest(env, {
           source_id: s.id, source_type: 'bluesky', text: p.record.text,
-          url: postUrl(s.bluesky_did, p.uri), detected_at: new Date(p.record.createdAt).toISOString(),
+          url: postUrl(s.bluesky_did, p.uri), detected_at,
         });
         if (r.ok && !r.duplicate) ingested++;
       }
