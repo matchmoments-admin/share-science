@@ -1077,11 +1077,11 @@ export async function adminNewsletter(env: Env): Promise<Response> {
 
       <section class="card"><header><div><h3>This week — ${escapeHtml(week)}${tip('nl-actions')}</h3><p class="csub">Generation is automatic each week. Publishing creates a beehiiv DRAFT only — you review + send inside beehiiv.</p></div></header>
         <div class="body"><div class="actions">
-          <button data-act="/admin/run-weekly?week=${wk}${hasDraft ? '&force=1' : ''}"${hasDraft ? ' data-confirm="Regenerate this week\'s draft? This re-runs the LLM (small budget cost) and overwrites the stored draft."' : ''}>${hasDraft ? 'Regenerate this week' : 'Generate this week'}</button>
+          <button data-act="/admin/run-weekly?week=${wk}${hasDraft ? '&force=1' : ''}"${hasDraft ? ' data-confirm="Regenerate this week\'s issue from the latest data? Overwrites the stored draft (free — no LLM)."' : ''}>${hasDraft ? 'Regenerate this week' : 'Generate this week'}</button>
           ${hasDraft ? `<a class="btn ghost" href="/admin/digest?week=${wk}" target="_blank" rel="noopener">Preview draft ↗</a>` : ''}
           <button class="ghost" data-act="/admin/publish-digest?week=${wk}" data-confirm="Create a beehiiv DRAFT for ${escapeHtml(week)}? It will NOT send — you review + send in beehiiv.">Push to beehiiv draft</button>
           <button class="ghost" data-act="/admin/sync-subscribers">Sync subscribers${subUnsynced ? ` (${subUnsynced})` : ''}</button>
-        </div><pre id="out" class="muted" style="margin-top:12px">Drafting is budget-gated (~10¢) and runs the compliance gate; a blocked draft shows its reason here. beehiiv calls are free and never auto-send.</pre></div></section>
+        </div><pre id="out" class="muted" style="margin-top:12px">The issue renders deterministically from the ledger (the Editorial email template) — free, no LLM, and it passes the compliance gate. A blocked issue shows its reason here. beehiiv calls are free and never auto-send.</pre></div></section>
 
       ${hasDraft ? `<section class="card"><header><div><h3>Preview — ${escapeHtml(week)}</h3><p class="csub">The stored draft, exactly as it would paste into beehiiv</p></div></header>
         <div class="body"><iframe src="/admin/digest?week=${wk}" style="width:100%;height:540px;border:1px solid var(--line);border-radius:var(--r-md);background:#fff"></iframe></div></section>` : ''}

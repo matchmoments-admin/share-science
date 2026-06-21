@@ -1,32 +1,20 @@
 /**
- * Weekly newsletter draft. Deterministic facts pack from the ledger → Claude drafts factual copy
- * → assertFactual() gate (report-not-recommend) → store HTML in R2 for manual paste into beehiiv.
- * Direct beehiiv API push is deferred (needs creds); founder reviews + sends the stored draft.
+ * Weekly newsletter. Deterministic facts pack from the ledger → deterministic, email-safe HTML
+ * (the "Editorial" template, designed in Claude Design) → assertFactual() gate → store in R2 →
+ * founder reviews + pushes a beehiiv DRAFT. No LLM in the loop: the issue is structured data, so
+ * it renders directly from the facts — $0 per issue, deterministic, and inherently report-not-advice.
  */
-import Anthropic from '@anthropic-ai/sdk';
 import type { Env } from '../types.js';
 import { nowISO, logOps } from './db.js';
-import { withinBudget, recordSpend } from './usage.js';
 import { assertFactual, checkFactual } from './advisory.js';
-import { HYPOTHETICAL_NOTE } from './render.js';
+import { escapeHtml } from './render.js';
 import { configured as beehiivConfigured, createPostDraft } from './beehiiv.js';
 
-const DRAFT_BUDGET_CENTS = 10;
-const DEFAULT_MODEL = 'claude-opus-4-8';
 // Public-leaderboard visibility floor — mirror of MIN_PUBLIC_TIPS in pages.ts so the newsletter
 // never surfaces a source the public site suppresses. Keep in sync.
 const MIN_PUBLIC_TIPS = 5;
 // We feature ~3 named shares per issue (settled outcomes first, then newest still-pending tips).
 const FEATURED_TARGET = 3;
-
-// Per-1M-token cents by model, so the spend ledger reflects what actually ran (not a hardcoded tier).
-const MODEL_RATES: Record<string, { in: number; out: number }> = {
-  'claude-haiku-4-5': { in: 100, out: 500 },
-  'claude-opus-4-8': { in: 500, out: 2500 },
-};
-function modelRate(model: string): { in: number; out: number } {
-  return MODEL_RATES[model] ?? MODEL_RATES['claude-opus-4-8']; // unknown → conservative (highest) rate
-}
 
 interface ResolvedCall { tie_back_id: string; ticker: string; source: string; direction: string; return_pct: number | null; excess_pct: number | null; is_hit: number | null; horizon_days?: number; as_of?: string }
 
@@ -153,54 +141,116 @@ export async function assembleFactsPack(env: Env, week = isoWeek()): Promise<Fac
   };
 }
 
-export async function draftDigest(env: Env, pack: FactsPack): Promise<{ text: string; costCents: number }> {
-  if (!env.ANTHROPIC_API_KEY) throw new Error('ANTHROPIC_API_KEY not set');
-  const client = new Anthropic({ apiKey: env.ANTHROPIC_API_KEY });
-  const model = env.DIGEST_MODEL || env.EXTRACT_MODEL || DEFAULT_MODEL;
-  const msg = await client.messages.create({
-    model,
-    max_tokens: 1500,
-    system:
-      'You write a weekly newsletter for "share-science", which empirically tracks how public ' +
-      'share tips perform vs the market. STRICT RULES: report only the facts in the provided JSON. ' +
-      'Backward-looking and factual ONLY. Never tell the reader to buy, sell, or hold; never call ' +
-      'anything a "pick" or "best"; never predict; never use numbers not present in the JSON. Plain, ' +
-      'concise prose. Lead with the section "This Week\'s Three": enumerate EACH item in featured[] — ' +
-      'state the source (tipster), the direction (bullish/bearish), and the share (ticker). For a ' +
-      'featured item with status "settled", report its realistic outcome at its horizon_days using the ' +
-      'is_hit field as the authoritative verdict (is_hit=1 -> "a hit", is_hit=0 -> "a miss"). ' +
-      'CRITICAL — read the verdict THROUGH the direction so it never reads as a contradiction: a ' +
-      'BULLISH (buy) call wins when the share RISES / beats the benchmark; a BEARISH (sell) call wins ' +
-      'when the share FALLS / underperforms. So for a bearish call where the share went UP or BEAT the ' +
-      'benchmark, state plainly that the call MISSED BECAUSE the share rose/outperformed (do NOT present ' +
-      'a positive return or positive excess_pct as if it vindicated a sell call). Quote return_pct and ' +
-      'excess_pct vs the benchmark as the evidence, but always tie the hit/miss to whether the share ' +
-      'moved the way the call expected. For status "pending", say it was newly tracked (around ' +
-      'detected_at) and its outcome has not settled yet — NEVER invent or imply an outcome for a ' +
-      'pending share. Then add these recurring sections, ' +
-      'omitting any whose data is absent: "The Leaderboard" (top_sources), "Called It / Blew It" ' +
-      '(called_it = strongest settled call by alpha, blew_it = weakest — describe outcomes, do not ' +
-      'praise or criticise the source; if blew_it is null, omit it), "The $1,000 Journey" ' +
-      '(dollar_journey: an index off a $1,000 base = the equal-weighted AVERAGE return across all ' +
-      'tracked calls, not a single compounding portfolio — describe as a hypothetical average, never a ' +
-      'real or guaranteed portfolio), "The Horizon Report" (horizon_report win rates by holding period). ' +
-      'Every figure is a paper-traded (hypothetical) outcome — never imply real money was invested or ' +
-      'that results are guaranteed. End with one neutral line: "General information only — hypothetical, ' +
-      'paper-traded outcomes, not advice."',
-    messages: [{ role: 'user', content: `Write this week's issue from these facts:\n\n${JSON.stringify(pack, null, 2)}` }],
-  });
-  const rate = modelRate(model);
-  const costCents = (msg.usage.input_tokens / 1e6) * rate.in + (msg.usage.output_tokens / 1e6) * rate.out;
-  const text = msg.content.filter((b): b is Anthropic.TextBlock => b.type === 'text').map((b) => b.text).join('\n').trim();
-  return { text, costCents };
+// ── Editorial email renderer (deterministic, email-safe) ─────────────
+// Font stacks: custom web fonts (loaded via <link> for clients that honour it, e.g. Apple Mail)
+// with robust fallbacks everywhere else. All layout is table-based with inline styles for email.
+const F_DISPLAY = "'Saira Condensed','Arial Narrow',Arial,sans-serif";
+const F_BODY = "'Public Sans',Arial,sans-serif";
+const F_MONO = "'IBM Plex Mono','Courier New',monospace";
+const INK = '#1c1b18', PAPER = '#f4f2ec', PAGE = '#d7d4ca', MUTED = '#8d897e', FAINT = '#a09c90', LINE = '#ddd9cf', BODY = '#55524a';
+const GREEN = '#2f7d52', RED = '#c0463d';
+const WORDS = ['zero', 'one', 'two', 'three', 'four', 'five', 'six', 'seven', 'eight', 'nine', 'ten'];
+
+const word = (n: number) => (n >= 0 && n < WORDS.length ? WORDS[n] : String(n));
+const cap = (s: string) => s.charAt(0).toUpperCase() + s.slice(1);
+const signPct = (frac: number | null) => frac == null ? '—' : `${frac >= 0 ? '+' : '−'}${(Math.abs(frac) * 100).toFixed(2)}%`;
+const signPp = (frac: number | null) => frac == null ? '—' : `${frac >= 0 ? '+' : '−'}${(Math.abs(frac) * 100).toFixed(2)} pp`;
+const ratePct = (frac: number) => `${(frac * 100).toFixed(2).replace(/\.00$/, '')}%`;
+const isBearish = (dir: string) => /sell|bearish|short/i.test(dir);
+
+/** Render the FactsPack as the "Editorial" weekly email (Variation B). Deterministic + factual. */
+export function renderDigestHtml(pack: FactsPack, week: string): string {
+  const total = pack.featured.length;
+  const nSettled = pack.featured.filter((f) => f.status === 'settled').length;
+  const eyebrow = `This Week&rsquo;s ${cap(word(total || 0))}`;
+  const headline = total === 0 ? 'No calls settled this week.'
+    : nSettled === total ? `${cap(word(total))} call${total === 1 ? '' : 's'}<br>have settled.`
+    : nSettled === 0 ? `${cap(word(total))} new call${total === 1 ? '' : 's'}<br>tracked.`
+    : `${cap(word(total))} calls<br>this week.`;
+
+  const calls = pack.featured.map((c, i) => {
+    const n = String(i + 1).padStart(2, '0');
+    const dir = isBearish(c.direction) ? 'Bearish' : 'Bullish';
+    const action = isBearish(c.direction) ? 'Sell' : 'Buy';
+    const settled = c.status === 'settled';
+    const res = settled ? (c.is_hit === 1 ? { label: 'Hit', color: GREEN } : { label: 'Miss', color: RED }) : { label: 'Pending', color: FAINT };
+    const horizon = c.horizon_days ? `${c.horizon_days}-day` : '';
+    const sentence = settled
+      ? `${escapeHtml(c.source)}. Settled over a ${horizon} horizon &mdash; returned <strong style="color:${INK};">${signPct(c.return_pct)}</strong>, an excess of <strong style="color:${INK};">${signPp(c.excess_pct)}</strong> versus the benchmark.`
+      : `${escapeHtml(c.source)}. Newly tracked${c.detected_at ? ` ${escapeHtml(c.detected_at.slice(0, 10))}` : ''} &mdash; outcome still pending.`;
+    return `<table role="presentation" cellpadding="0" cellspacing="0" border="0" width="100%" style="margin-top:28px; border-top:1px solid ${LINE};"><tr>
+      <td style="padding-top:18px; width:64px; vertical-align:top;">
+        <div style="font-family:${F_DISPLAY}; font-weight:800; font-size:34px; line-height:0.9; color:#cbc6b9;">${n}</div>
+      </td>
+      <td style="padding-top:18px; vertical-align:top;">
+        <table role="presentation" cellpadding="0" cellspacing="0" border="0" width="100%"><tr>
+          <td style="vertical-align:baseline;">
+            <span style="font-family:${F_DISPLAY}; font-weight:800; font-size:26px; color:${INK};">${escapeHtml(c.ticker)}</span>
+            <span style="font-family:${F_MONO}; font-size:10px; letter-spacing:0.08em; text-transform:uppercase; color:${MUTED}; padding-left:8px;">${dir} &middot; ${action}</span>
+          </td>
+          <td style="text-align:right; vertical-align:baseline;">
+            <span style="font-family:${F_DISPLAY}; font-weight:700; font-size:13px; letter-spacing:0.12em; text-transform:uppercase; color:${INK}; border-bottom:2px solid ${res.color}; padding-bottom:2px;">${res.label}</span>
+          </td>
+        </tr></table>
+        <div style="font-family:${F_BODY}; font-size:13px; line-height:1.55; color:${BODY}; margin-top:12px;">${sentence}</div>
+      </td>
+    </tr></table>`;
+  }).join('');
+
+  const journey = pack.dollar_journey ? `<table role="presentation" cellpadding="0" cellspacing="0" border="0" width="100%" style="margin-top:34px; border-top:2px solid ${INK};"><tr>
+    <td style="padding-top:22px;">
+      <div style="font-family:${F_MONO}; font-size:10px; letter-spacing:0.14em; text-transform:uppercase; color:${FAINT};">The $1,000 Journey</div>
+      <table role="presentation" cellpadding="0" cellspacing="0" border="0" width="100%" style="margin-top:8px;"><tr>
+        <td style="vertical-align:bottom;"><span style="font-family:${F_DISPLAY}; font-weight:800; font-size:68px; line-height:0.85; letter-spacing:-0.02em; color:${INK};">${pack.dollar_journey.nav_index.toFixed(2)}</span></td>
+        <td style="vertical-align:bottom; text-align:right;"><span style="font-family:${F_MONO}; font-size:10px; color:${MUTED};">as of ${escapeHtml(pack.dollar_journey.as_of)}</span></td>
+      </tr></table>
+      <div style="font-family:${F_BODY}; font-size:12px; line-height:1.55; color:#76736a; margin-top:14px;">Average return across all tracked calls, applied to a $1,000 base. An average of paper-traded outcomes &mdash; not a real or guaranteed portfolio.</div>
+    </td>
+  </tr></table>` : '';
+
+  const horizonRows = pack.horizon_report.map((h) => `<table role="presentation" cellpadding="0" cellspacing="0" border="0" width="100%" style="margin-top:12px; border-top:1px solid ${LINE};"><tr>
+    <td style="padding-top:12px; vertical-align:baseline;">
+      <span style="font-family:${F_DISPLAY}; font-weight:700; font-size:22px; color:${INK};">${h.horizon_days}-day</span>
+      <span style="font-family:${F_MONO}; font-size:11px; color:${MUTED}; padding-left:8px;">${h.n_tips} tips &middot; ${ratePct(h.hit_rate)} hit rate</span>
+    </td>
+    <td style="padding-top:12px; text-align:right; vertical-align:baseline;">
+      <span style="font-family:${F_MONO}; font-size:10px; text-transform:uppercase; letter-spacing:0.08em; color:${FAINT};">avg excess&nbsp;&nbsp;</span>
+      <span style="font-family:${F_DISPLAY}; font-weight:700; font-size:20px; color:${INK};">${signPp(h.avg_excess_pct)}</span>
+    </td>
+  </tr></table>`).join('');
+  const horizonBlock = pack.horizon_report.length ? `<div style="font-family:${F_MONO}; font-size:10px; letter-spacing:0.14em; text-transform:uppercase; color:${FAINT}; margin-top:34px;">The Horizon Report</div>${horizonRows}` : '';
+
+  return `<!DOCTYPE html><html><head><meta charset="utf-8"><meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Shareo Weekly &mdash; ${escapeHtml(week)}</title>
+<link href="https://fonts.googleapis.com/css2?family=Saira+Condensed:wght@700;800&family=Public+Sans:wght@400;600;700&family=IBM+Plex+Mono:wght@400;500&display=swap" rel="stylesheet">
+</head><body style="margin:0; background:${PAGE};">
+<table role="presentation" cellpadding="0" cellspacing="0" border="0" width="100%" style="background:${PAGE};"><tr><td align="center" style="padding:32px 12px;">
+<table role="presentation" cellpadding="0" cellspacing="0" border="0" width="600" style="width:600px; max-width:600px; background:${PAPER}; border-radius:4px; box-shadow:0 18px 40px rgba(40,38,30,0.18); overflow:hidden;"><tr><td style="padding:40px 44px;">
+
+  <table role="presentation" cellpadding="0" cellspacing="0" border="0" width="100%" style="border-bottom:2px solid ${INK};"><tr>
+    <td style="vertical-align:bottom; padding-bottom:12px;"><span style="font-family:${F_DISPLAY}; font-weight:800; font-size:24px; letter-spacing:0.01em; color:${INK};">Shareo</span></td>
+    <td style="vertical-align:bottom; text-align:right; padding-bottom:14px;"><span style="font-family:${F_MONO}; font-size:11px; letter-spacing:0.1em; text-transform:uppercase; color:${MUTED};">Weekly &middot; ${escapeHtml(week)}</span></td>
+  </tr></table>
+
+  <div style="font-family:${F_MONO}; font-size:10px; letter-spacing:0.14em; text-transform:uppercase; color:${FAINT}; margin-top:30px;">${eyebrow}</div>
+  <div style="font-family:${F_DISPLAY}; font-weight:800; font-size:52px; line-height:0.95; letter-spacing:-0.015em; color:${INK}; margin-top:8px;">${headline}</div>
+
+  ${calls}
+  ${journey}
+  ${horizonBlock}
+
+  <div style="font-family:${F_BODY}; font-size:10.5px; line-height:1.6; color:#9a9689; margin-top:30px; padding-top:18px; border-top:1px solid ${LINE};">General information only. Hypothetical, paper-traded outcomes &mdash; entries are simulated at the first market bar after a call was detected; no real capital is at risk. Past performance is no guarantee of future results.</div>
+  <div style="font-family:${F_MONO}; font-size:10px; color:#9a9689; margin-top:14px;">Shareo &middot; Unsubscribe &middot; Manage preferences</div>
+
+</td></tr></table>
+</td></tr></table>
+</body></html>`;
 }
 
-/** Assemble → draft → assertFactual → store HTML in R2. Returns the stored key + verdict. */
+/** Assemble → render the Editorial email → compliance gate → store HTML in R2. Deterministic, no LLM. */
 export async function generateAndStoreDigest(env: Env, week = isoWeek(), force = false): Promise<{ ok: boolean; week: string; key?: string; reason?: string }> {
   const key = `digests/${week}.html`;
-  // Idempotent per week: if this week's draft already exists, return it WITHOUT re-paying for an
-  // identical Opus/Haiku draft. The weekly cron, /admin/run-weekly, and any re-run all hit the cache.
-  // Pass force=true (e.g. ?force=1) to deliberately regenerate after more outcomes settle.
+  // Idempotent per week unless force=true (e.g. ?force=1 after more outcomes settle).
   if (!force) {
     const existing = await env.RAW_MEDIA.head(key);
     if (existing) {
@@ -208,32 +258,22 @@ export async function generateAndStoreDigest(env: Env, week = isoWeek(), force =
       return { ok: true, week, key, reason: 'cached' };
     }
   }
-  if (!(await withinBudget(env, DRAFT_BUDGET_CENTS))) {
-    await logOps(env, 'publish', { skipped: 'over_budget', week });
-    return { ok: false, week, reason: 'over_budget' };
-  }
   const pack = await assembleFactsPack(env, week);
-  // Quiet-week guard: don't pay to draft (or ship) an empty issue. Need at least one featured share
-  // OR a populated franchise (leaderboard / horizon report) to have something honest to say.
+  // Quiet-week guard: don't ship an empty issue. Need a featured share OR a populated franchise.
   if (pack.featured.length === 0 && pack.top_sources.length === 0 && pack.horizon_report.length === 0) {
     await logOps(env, 'publish', { week, skipped: 'quiet_week_no_content' });
     return { ok: false, week, reason: 'quiet_week_no_content' };
   }
-  const { text, costCents } = await draftDigest(env, pack);
-  await recordSpend(env, costCents);
-
-  const verdict = checkFactual(text);
+  const html = renderDigestHtml(pack, week);
+  // Belt-and-suspenders: the render is deterministic + factual, but still gate it (e.g. a source name
+  // that happened to contain advice language would block rather than ship).
+  const verdict = checkFactual(html);
   if (!verdict.ok) {
     await logOps(env, 'compliance', { week, blocked: 'advice_language', violations: verdict.violations });
     return { ok: false, week, reason: `advice_language: ${verdict.violations.join(', ')}` };
   }
-  assertFactual(text); // belt-and-suspenders
+  assertFactual(html);
 
-  const html = `<!doctype html><meta charset="utf-8"><title>share-science ${week}</title>` +
-    `<article style="font:16px/1.6 system-ui;max-width:680px;margin:2rem auto">` +
-    text.split('\n').map((p) => (p.trim() ? `<p>${p.replace(/&/g, '&amp;').replace(/</g, '&lt;')}</p>` : '')).join('') +
-    `<hr><p style="font-size:.8rem;opacity:.7">${HYPOTHETICAL_NOTE.replace(/&/g, '&amp;').replace(/</g, '&lt;')}</p>` +
-    `</article>`;
   await env.RAW_MEDIA.put(key, html, { httpMetadata: { contentType: 'text/html; charset=utf-8' } });
   await logOps(env, 'publish', { week, key, featured: pack.featured.length, settled: pack.settled_this_week.length, top_sources: pack.top_sources.length });
   return { ok: true, week, key };
