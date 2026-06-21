@@ -5,7 +5,7 @@
  */
 import type { Env } from '../../types.js';
 import { ingest } from '../ingest.js';
-import { logOps } from '../db.js';
+import { logOps, recordSourceHealth } from '../db.js';
 
 const APPVIEW = 'https://public.api.bsky.app/xrpc/app.bsky.feed.getAuthorFeed';
 const MAX_SOURCES_PER_RUN = 25;
@@ -28,7 +28,7 @@ interface FeedPost {
 export async function pollBlueskySources(env: Env): Promise<{ sources: number; items: number; ingested: number }> {
   const sources = (await env.DB.prepare(
     `SELECT id, bluesky_did FROM sources
-      WHERE active = 1 AND ingest_method = 'bluesky' AND bluesky_did IS NOT NULL
+      WHERE active = 1 AND tos_checked = 1 AND ingest_method = 'bluesky' AND bluesky_did IS NOT NULL
       ORDER BY last_cursor ASC LIMIT ?`,
   ).bind(MAX_SOURCES_PER_RUN).all<BskySource>()).results ?? [];
 
@@ -49,8 +49,10 @@ export async function pollBlueskySources(env: Env): Promise<{ sources: number; i
         });
         if (r.ok && !r.duplicate) ingested++;
       }
+      await recordSourceHealth(env, s.id, true);
     } catch (err) {
-      await logOps(env, 'error', { at: 'pollBlueskySources', source: s.id, err: String(err) });
+      await logOps(env, 'warn', { at: 'pollBlueskySources', source: s.id, err: String(err) });
+      await recordSourceHealth(env, s.id, false, String(err));
     }
     await env.DB.prepare('UPDATE sources SET last_cursor = ? WHERE id = ?').bind(new Date().toISOString(), s.id).run();
   }

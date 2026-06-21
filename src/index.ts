@@ -147,6 +147,21 @@ async function handleAddSource(req: Request, env: Env): Promise<Response> {
   return json({ ok: true, id });
 }
 
+/** Admin: record (or clear) the per-source ToS sign-off. Pollers only poll tos_checked=1 sources. */
+async function handleSetTos(req: Request, env: Env): Promise<Response> {
+  if (!authed(req, env)) return json({ error: 'unauthorized' }, 401);
+  const u = new URL(req.url);
+  const id = u.searchParams.get('id');
+  if (!id) return json({ error: 'missing ?id=' }, 400);
+  const checked = u.searchParams.get('checked') === '0' ? 0 : 1;
+  const note = (u.searchParams.get('note') || '').slice(0, 300);
+  const r = await env.DB.prepare(
+    'UPDATE sources SET tos_checked=?, tos_checked_at=?, tos_checked_by=?, tos_note=? WHERE id=?',
+  ).bind(checked, checked ? nowISO() : null, checked ? 'admin' : null, note || null, id).run();
+  await logAdmin(env, '/admin/set-tos', { id, checked });
+  return json({ ok: !!r.meta.changes, id, tos_checked: checked });
+}
+
 /** Admin: pause/resume a source (active flag). */
 async function handleToggleSource(req: Request, env: Env): Promise<Response> {
   if (!authed(req, env)) return json({ error: 'unauthorized' }, 401);
@@ -435,6 +450,7 @@ export default {
     if (url.pathname === '/admin/subscribers' && req.method === 'GET') return authed(req, env) ? adminSubscribers(env) : adminLoginPage();
     if (url.pathname === '/admin/add-source' && req.method === 'POST') return handleAddSource(req, env);
     if (url.pathname === '/admin/toggle-source' && req.method === 'POST') return handleToggleSource(req, env);
+    if (url.pathname === '/admin/set-tos' && req.method === 'POST') return handleSetTos(req, env);
     if (url.pathname === '/admin/find-feed' && req.method === 'POST') return handleFindFeed(req, env);
     // Trade approval + brokerage controls (mutations).
     if (url.pathname === '/admin/approve-trade' && req.method === 'POST') return handleApproveTrade(req, env);

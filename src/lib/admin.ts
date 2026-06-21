@@ -101,7 +101,9 @@ const TIP: Record<string, string> = {
   'dim:conviction:90': 'A 90-day ranking where higher-conviction tips count for more (high=3, medium=2, low=1) in Hit and Alpha. The Score stays on the raw unweighted sample, so labelling everything high-conviction cannot manufacture statistical confidence.',
   // sources / add-tip
   'src-add': 'Creates a row in the sources table. A tip must reference an existing source (foreign key), so add the source before its first tip. Method picks the pipeline: manual = you paste tips; rss_fulltext / podcast_transcript / bluesky = auto-polled by the hourly cron.',
-  'src-list': 'Every source. Pause sets active=0 so the cron stops polling it without deleting history; resume re-enables it. tos_checked stays 0 until you have verified the feed’s terms of service.',
+  'src-list': 'Every source. Pause sets active=0 so the cron stops polling it without deleting history; resume re-enables it.',
+  'src-tos': 'The hard ToS gate: an auto-poll source is only ever polled once you have verified its terms of service allow this use and clicked "Mark ToS-checked" (which records who/when/note). Unchecked auto-sources are NOT polled — by design.',
+  'src-health': 'Per-source poll health, set by the cron. "ok" + date = last successful fetch; "failing ×N" = N consecutive failed polls (hover for the error) — a dead feed to fix or retire. "Tips" shows lifetime tips and the % that abstained (couldn’t resolve a security).',
   'tip-add': 'Submits to the same /ingest/human seam the automated pollers use: Claude extracts the call, resolve.ts matches the security (or abstains → review queue), and the daily pass opens a paper position at the first market bar AFTER the publish date.',
   'tip-date': 'The REAL publication date of the tip — this is the look-ahead anchor. Entry price is the first market bar strictly after it, so back-dating to today would fabricate a same-day entry. Rejected if in the future or older than ~3 years.',
   // newsletter
@@ -838,21 +840,32 @@ export async function adminTrading(env: Env): Promise<Response> {
 }
 
 // ── Sources view ─────────────────────────────────────────────────────
-interface SourceRow { id: string; name: string; medium: string; feed_url: string | null; bluesky_did: string | null; ingest_method: string; active: number | null; last_cursor: string | null }
+interface SourceRow {
+  id: string; name: string; medium: string; feed_url: string | null; bluesky_did: string | null;
+  ingest_method: string; active: number | null; tos_checked: number | null; tos_checked_at: string | null;
+  last_success_at: string | null; last_error: string | null; consecutive_failures: number | null;
+  tips: number; review: number;
+}
 
-/** Create + list + activate/deactivate sources. Sources must exist before their first tip (FK). */
+/** Create + list + activate/deactivate sources + ToS sign-off + health. Sources precede their tips (FK). */
 export async function adminSources(env: Env): Promise<Response> {
   const sources = (await env.DB.prepare(
-    `SELECT id, name, medium, feed_url, bluesky_did, ingest_method, active, last_cursor
-       FROM sources ORDER BY (active IS NULL OR active=1) DESC, name LIMIT 200`,
+    `SELECT s.id, s.name, s.medium, s.feed_url, s.bluesky_did, s.ingest_method, s.active,
+            s.tos_checked, s.tos_checked_at, s.last_success_at, s.last_error, s.consecutive_failures,
+            COUNT(t.id) tips, SUM(CASE WHEN t.status='review' THEN 1 ELSE 0 END) review
+       FROM sources s LEFT JOIN tips t ON t.source_id = s.id
+      GROUP BY s.id ORDER BY (s.active IS NULL OR s.active=1) DESC, s.name LIMIT 200`,
   ).all<SourceRow>()).results ?? [];
+  const autoMethods = new Set(['rss_fulltext', 'podcast_transcript', 'bluesky']);
+  const needsToS = sources.filter((s) => (s.active == null || s.active === 1) && autoMethods.has(s.ingest_method) && s.tos_checked !== 1).length;
 
   const methodPill = (m: string) => `<span class="pill">${escapeHtml(m)}</span>`;
   const body = `<div class="app">${railNav('sources')}<div class="main">
     <header class="topbar"><div class="search">${icon('rss', 15)}<span>Sources — where tips come from</span></div>
       <button onclick="location.reload()">↻ Refresh</button></header>
     <div class="content">
-      <section class="card"><header><div><h3>Add a source${tip('src-add')}</h3><p class="csub">A source must exist before its first tip. RSS / podcast / Bluesky sources are auto-polled by the hourly cron.</p></div></header>
+      ${needsToS ? `<div class="panel" style="border-color:#c98a00;background:color-mix(in srgb, #c98a00 7%, var(--card))"><b style="color:#c98a00">${needsToS} auto-poll source${needsToS === 1 ? '' : 's'} not ToS-checked</b> — these are <b>not being polled</b>. Review each feed's terms, then click <b>Mark ToS-checked</b> to start ingestion.</div>` : ''}
+      <section class="card"><header><div><h3>Add a source${tip('src-add')}</h3><p class="csub">A source must exist before its first tip. RSS / podcast / Bluesky sources are auto-polled by the hourly cron — once ToS-checked.</p></div></header>
         <div class="body">
           <div class="formgrid">
             <div class="field"><label>Name *</label><input id="s-name" placeholder="e.g. The Science of Hitting"></div>
@@ -873,16 +886,31 @@ export async function adminSources(env: Env): Promise<Response> {
           <pre id="out" class="muted" style="margin-top:12px">tos_checked defaults to 0 — verify each feed's terms before relying on it.</pre>
         </div></section>
 
-      <section class="card"><header><div><h3>Sources${tip('src-list')}</h3><p class="csub">${sources.length} total · pause to stop polling without deleting</p></div></header>
+      <section class="card"><header><div><h3>Sources${tip('src-list')}</h3><p class="csub">${sources.length} total · ToS-check to enable polling · pause to stop without deleting</p></div></header>
         <div class="body">${sources.length === 0 ? '<p class="muted">No sources yet.</p>' :
-          `<table><thead><tr><th>Name</th><th>Method</th><th>Locator</th><th>Status</th><th></th></tr></thead><tbody>
+          `<table><thead><tr><th>Name</th><th>Method</th><th>ToS${tip('src-tos')}</th><th>Health${tip('src-health')}</th><th class="num">Tips</th><th>Status</th><th></th></tr></thead><tbody>
           ${sources.map((s) => {
             const on = s.active == null || s.active === 1;
-            const locator = s.feed_url || s.bluesky_did || '–';
+            const auto = autoMethods.has(s.ingest_method);
+            const tosOk = s.tos_checked === 1;
+            const tips = s.tips || 0;
+            const abstainPct = tips ? Math.round(((s.review || 0) / tips) * 100) : 0;
+            const fails = s.consecutive_failures || 0;
+            // Health only meaningful for auto-polled sources.
+            const health = !auto ? '<span class="muted" style="font-size:.74rem">manual</span>'
+              : !tosOk ? '<span class="muted" style="font-size:.74rem">—</span>'
+              : fails >= 3 ? `<span class="pill" style="background:var(--bad);color:#fff;border:none" title="${escapeHtml(s.last_error || '')}">failing ×${fails}</span>`
+              : s.last_success_at ? `<span class="pill" style="color:var(--good);border-color:var(--good)">ok</span> <span class="mono muted" style="font-size:.7rem">${escapeHtml(s.last_success_at.slice(0, 10))}</span>`
+              : '<span class="muted" style="font-size:.74rem">not polled yet</span>';
+            const tosCell = !auto ? '<span class="muted" style="font-size:.74rem">n/a</span>'
+              : tosOk ? `<span class="pill" style="color:var(--good);border-color:var(--good)" title="checked ${escapeHtml(s.tos_checked_at || '')}">✓</span>`
+              : '<span class="pill" style="background:#c98a00;color:#fff;border:none">unchecked</span>';
             return `<tr>
-              <td><b>${escapeHtml(s.name)}</b> <span class="muted" style="font-size:.74rem">${escapeHtml(s.medium)}</span></td>
+              <td><b>${escapeHtml(s.name)}</b> <span class="muted" style="font-size:.72rem;display:block">${escapeHtml(s.feed_url || s.bluesky_did || s.medium)}</span></td>
               <td>${methodPill(s.ingest_method)}</td>
-              <td class="mono muted" style="font-size:.72rem;max-width:280px;white-space:normal;word-break:break-all">${escapeHtml(locator)}</td>
+              <td>${tosCell}${auto && !tosOk ? ` <button class="ghost" data-tos="${encodeURIComponent(s.id)}" style="padding:5px 9px;font-size:.74rem">Mark ToS-checked</button>` : ''}</td>
+              <td>${health}</td>
+              <td class="num">${tips}${tips && abstainPct ? ` <span class="muted" style="font-size:.7rem">${abstainPct}% abst</span>` : ''}</td>
               <td>${on ? '<span class="pill" style="color:var(--good);border-color:var(--good)">active</span>' : '<span class="pill">paused</span>'}</td>
               <td>${on
                 ? `<button class="ghost" data-toggle="/admin/toggle-source?id=${encodeURIComponent(s.id)}&active=0">Pause</button>`
@@ -897,6 +925,17 @@ export async function adminSources(env: Env): Promise<Response> {
           b.addEventListener('click', function(){
             b.disabled=true; out.textContent='Updating…';
             fetch(b.getAttribute('data-toggle'),{method:'POST'}).then(function(r){return r.json();})
+              .then(function(j){ if(j.ok){ location.reload(); } else { b.disabled=false; out.textContent='Error: '+(j.error||'failed'); } })
+              .catch(function(e){ b.disabled=false; out.textContent='Error: '+e; });
+          });
+        });
+        document.querySelectorAll('button[data-tos]').forEach(function(b){
+          b.addEventListener('click', function(){
+            var note=prompt('Record the ToS check for this source (short note — where you verified its terms allow this use):','');
+            if(note===null) return; // cancelled
+            b.disabled=true; out.textContent='Recording ToS check…';
+            fetch('/admin/set-tos?id='+b.getAttribute('data-tos')+'&note='+encodeURIComponent(note),{method:'POST'})
+              .then(function(r){return r.json();})
               .then(function(j){ if(j.ok){ location.reload(); } else { b.disabled=false; out.textContent='Error: '+(j.error||'failed'); } })
               .catch(function(e){ b.disabled=false; out.textContent='Error: '+e; });
           });

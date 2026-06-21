@@ -4,7 +4,7 @@
  */
 import type { Env } from '../../types.js';
 import { ingest } from '../ingest.js';
-import { logOps, isSafePublicUrl } from '../db.js';
+import { logOps, isSafePublicUrl, recordSourceHealth } from '../db.js';
 
 const MAX_ITEMS_PER_FEED = 10; // bound cost; older items already ingested earlier
 // Per-run cap (automation-safety rule): keep one poll invocation well under the Workers
@@ -27,7 +27,7 @@ interface RssSource {
 
 export async function pollRssSources(env: Env): Promise<{ feeds: number; items: number; ingested: number }> {
   const sources = (await env.DB.prepare(
-    `SELECT id, feed_url FROM sources WHERE active = 1 AND ingest_method = 'rss_fulltext' AND feed_url IS NOT NULL
+    `SELECT id, feed_url FROM sources WHERE active = 1 AND tos_checked = 1 AND ingest_method = 'rss_fulltext' AND feed_url IS NOT NULL
       ORDER BY last_cursor ASC LIMIT ?`,
   ).bind(MAX_FEEDS_PER_RUN).all<RssSource>()).results ?? [];
 
@@ -48,6 +48,7 @@ export async function pollRssSources(env: Env): Promise<{ feeds: number; items: 
       // External feed fetch/parse failure — transient and out of our control. Log as 'warn' so it
       // doesn't inflate the HIGH "Errors" alarm; the next poll retries.
       await logOps(env, 'warn', { at: 'pollRssSources', source: s.id, err: String(err) });
+      await recordSourceHealth(env, s.id, false, String(err));
     }
     await env.DB.prepare('UPDATE sources SET last_cursor = ? WHERE id = ?').bind(new Date().toISOString(), s.id).run();
   }
@@ -65,6 +66,7 @@ const BACKOFF_MS = 6 * 60 * 60 * 1000; // skip a feed for 6h after a 429/5xx —
 async function fetchFeed(env: Env, s: RssSource): Promise<RssItem[]> {
   if (!isSafePublicUrl(s.feed_url)) {
     await logOps(env, 'error', { at: 'fetchFeed', source: s.id, err: 'unsafe_feed_url' });
+    await recordSourceHealth(env, s.id, false, 'unsafe_feed_url');
     return []; // SSRF guard — only https public hosts
   }
   const boKey = `feedbackoff:${s.id}`;
@@ -78,18 +80,20 @@ async function fetchFeed(env: Env, s: RssSource): Promise<RssItem[]> {
   if (meta?.lastmod) headers['if-modified-since'] = meta.lastmod;
 
   const resp = await fetch(s.feed_url, { headers });
-  if (resp.status === 304) return []; // unchanged since last poll
+  if (resp.status === 304) { await recordSourceHealth(env, s.id, true); return []; } // reachable, unchanged
   if (resp.status === 429 || resp.status >= 500) {
     await env.KV.put(boKey, String(Date.now() + BACKOFF_MS), { expirationTtl: Math.ceil(BACKOFF_MS / 1000) });
     // Transient feed rate-limit (429) / outage (5xx) — we back off 6h. Log as 'warn', not 'error'.
     await logOps(env, 'warn', { at: 'fetchFeed', source: s.id, status: resp.status, action: 'backoff_6h' });
+    await recordSourceHealth(env, s.id, false, `status ${resp.status}`);
     return [];
   }
-  if (!resp.ok) return []; // 4xx (e.g. 404) — skip quietly this run
+  if (!resp.ok) { await recordSourceHealth(env, s.id, false, `status ${resp.status}`); return []; } // 4xx — skip quietly
 
   const etag = resp.headers.get('etag');
   const lastmod = resp.headers.get('last-modified');
   if (etag || lastmod) await env.KV.put(metaKey, JSON.stringify({ etag, lastmod }), { expirationTtl: 30 * 86400 });
+  await recordSourceHealth(env, s.id, true);
   return parseRss(await resp.text());
 }
 

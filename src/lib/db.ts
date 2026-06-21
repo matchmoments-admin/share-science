@@ -68,3 +68,22 @@ export async function logOps(env: { DB: D1Database }, kind: string, detail: unkn
     /* swallow */
   }
 }
+
+/**
+ * Record per-source poll health (migration 0014). Best-effort — never throws into a poller.
+ * ok=true clears the error + failure streak and stamps last_success_at; ok=false records the error
+ * and increments consecutive_failures so the Sources view can flag dead/failing feeds.
+ */
+export async function recordSourceHealth(env: { DB: D1Database }, sourceId: string, ok: boolean, error?: string): Promise<void> {
+  try {
+    if (ok) {
+      await env.DB.prepare('UPDATE sources SET last_success_at = ?, last_error = NULL, consecutive_failures = 0 WHERE id = ?')
+        .bind(nowISO(), sourceId).run();
+    } else {
+      await env.DB.prepare('UPDATE sources SET last_error = ?, consecutive_failures = consecutive_failures + 1 WHERE id = ?')
+        .bind((error || 'error').slice(0, 200), sourceId).run();
+    }
+  } catch {
+    /* swallow — health is observational, never block ingestion */
+  }
+}

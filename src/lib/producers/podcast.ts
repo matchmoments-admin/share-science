@@ -8,7 +8,7 @@
  */
 import type { Env } from '../../types.js';
 import { ingest } from '../ingest.js';
-import { logOps, isSafePublicUrl } from '../db.js';
+import { logOps, isSafePublicUrl, recordSourceHealth } from '../db.js';
 import { withinBudget, recordSpend } from '../usage.js';
 import { parseRss, stripHtml, toISO } from './rss.js';
 
@@ -27,7 +27,7 @@ export async function pollPodcastSources(env: Env): Promise<{ sources: number; e
 
   const sources = (await env.DB.prepare(
     `SELECT id, feed_url FROM sources
-      WHERE active = 1 AND ingest_method = 'podcast_transcript' AND feed_url IS NOT NULL
+      WHERE active = 1 AND tos_checked = 1 AND ingest_method = 'podcast_transcript' AND feed_url IS NOT NULL
       ORDER BY last_cursor ASC LIMIT ?`,
   ).bind(MAX_PODCASTS_PER_RUN).all<PodSource>()).results ?? [];
 
@@ -38,10 +38,12 @@ export async function pollPodcastSources(env: Env): Promise<{ sources: number; e
     try {
       if (!isSafePublicUrl(s.feed_url)) {
         await logOps(env, 'error', { at: 'pollPodcastSources', source: s.id, err: 'unsafe_feed_url' });
+        await recordSourceHealth(env, s.id, false, 'unsafe_feed_url');
         continue;
       }
       const resp = await fetch(s.feed_url, { headers: { 'user-agent': 'share-science/0.1' } });
-      if (!resp.ok) continue;
+      if (!resp.ok) { await recordSourceHealth(env, s.id, false, `status ${resp.status}`); continue; }
+      await recordSourceHealth(env, s.id, true);
       const items = parseRss(await resp.text());
       for (const it of items) {
         if (budget <= 0) break;
@@ -72,7 +74,8 @@ export async function pollPodcastSources(env: Env): Promise<{ sources: number; e
         if (r.ok && !r.duplicate) ingested++;
       }
     } catch (err) {
-      await logOps(env, 'error', { at: 'pollPodcastSources', source: s.id, err: String(err) });
+      await logOps(env, 'warn', { at: 'pollPodcastSources', source: s.id, err: String(err) });
+      await recordSourceHealth(env, s.id, false, String(err));
     }
     await env.DB.prepare('UPDATE sources SET last_cursor = ? WHERE id = ?').bind(new Date().toISOString(), s.id).run();
   }

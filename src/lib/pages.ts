@@ -7,6 +7,10 @@ import { assertNoRawPrices } from './advisory.js';
 import { layout, escapeHtml, pctCell, score, asOf, HYPOTHETICAL_NOTE } from './render.js';
 
 const DEFAULT_DIM = 'horizon:90';
+// A source only appears on the PUBLIC leaderboard once it has this many settled tips — a floor that
+// prevents ranking anyone on 1-2 lucky calls (the Wilson score already discounts small samples; this
+// is the visibility gate on top). Source-selection policy decision, 2026-06-20.
+const MIN_PUBLIC_TIPS = 5;
 // Publishable leaderboard dimensions. Default stays horizon:90 for backward-compat; `primary`
 // scores each tip on its own stated horizon; `conviction:90` weights by stated conviction.
 const ALLOWED_DIMS = ['horizon:90', 'horizon:30', 'horizon:365', 'primary', 'conviction:90'];
@@ -33,7 +37,7 @@ export async function leaderboard(env: Env, dimParam?: string | null): Promise<R
     `SELECT sr.source_id, s.name AS source_name, sr.tier, sr.n_tips, sr.hit_rate,
             sr.avg_excess_pct, sr.rating_score, sr.score_lower, sr.rank, sr.updated_at
        FROM source_ratings sr JOIN sources s ON s.id = sr.source_id
-      WHERE sr.dimension = ? ORDER BY sr.rank ASC`,
+      WHERE sr.dimension = ? AND sr.n_tips >= ${MIN_PUBLIC_TIPS} ORDER BY sr.rank ASC`,
   ).bind(dim).all()).results ?? [];
   assertNoRawPrices(env, rows);
 
@@ -73,7 +77,7 @@ export async function leaderboardJson(env: Env, dimParam?: string | null): Promi
             sr.hit_rate, sr.avg_excess_pct, sr.median_excess_pct, sr.rating_score, sr.score_lower,
             sr.score_upper, sr.rank, sr.updated_at
        FROM source_ratings sr JOIN sources s ON s.id = sr.source_id
-      WHERE sr.dimension = ? ORDER BY sr.rank ASC`,
+      WHERE sr.dimension = ? AND sr.n_tips >= ${MIN_PUBLIC_TIPS} ORDER BY sr.rank ASC`,
   ).bind(dim).all()).results ?? [];
   assertNoRawPrices(env, rows);
   return json({
