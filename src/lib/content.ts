@@ -167,10 +167,17 @@ export async function draftDigest(env: Env, pack: FactsPack): Promise<{ text: st
       'anything a "pick" or "best"; never predict; never use numbers not present in the JSON. Plain, ' +
       'concise prose. Lead with the section "This Week\'s Three": enumerate EACH item in featured[] — ' +
       'state the source (tipster), the direction (bullish/bearish), and the share (ticker). For a ' +
-      'featured item with status "settled", report its realistic outcome (return_pct and excess_pct vs ' +
-      'the market benchmark, and whether it was a hit or miss) at its horizon_days; for status ' +
-      '"pending", say it was newly tracked (around detected_at) and its outcome has not settled yet — ' +
-      'NEVER invent or imply an outcome for a pending share. Then add these recurring sections, ' +
+      'featured item with status "settled", report its realistic outcome at its horizon_days using the ' +
+      'is_hit field as the authoritative verdict (is_hit=1 -> "a hit", is_hit=0 -> "a miss"). ' +
+      'CRITICAL — read the verdict THROUGH the direction so it never reads as a contradiction: a ' +
+      'BULLISH (buy) call wins when the share RISES / beats the benchmark; a BEARISH (sell) call wins ' +
+      'when the share FALLS / underperforms. So for a bearish call where the share went UP or BEAT the ' +
+      'benchmark, state plainly that the call MISSED BECAUSE the share rose/outperformed (do NOT present ' +
+      'a positive return or positive excess_pct as if it vindicated a sell call). Quote return_pct and ' +
+      'excess_pct vs the benchmark as the evidence, but always tie the hit/miss to whether the share ' +
+      'moved the way the call expected. For status "pending", say it was newly tracked (around ' +
+      'detected_at) and its outcome has not settled yet — NEVER invent or imply an outcome for a ' +
+      'pending share. Then add these recurring sections, ' +
       'omitting any whose data is absent: "The Leaderboard" (top_sources), "Called It / Blew It" ' +
       '(called_it = strongest settled call by alpha, blew_it = weakest — describe outcomes, do not ' +
       'praise or criticise the source; if blew_it is null, omit it), "The $1,000 Journey" ' +
