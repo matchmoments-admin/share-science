@@ -447,6 +447,7 @@ export async function adminDashboard(env: Env): Promise<Response> {
     `SELECT COUNT(*) n FROM ops_events WHERE kind='error' AND created_at >= ? AND (? IS NULL OR created_at > ?)`,
   ).bind(iso24, lastValuedAt, lastValuedAt).first<{ n: number }>();
   const [unsynced] = await rows<{ n: number }>(env, `SELECT COUNT(*) n FROM subscribers WHERE status='active' AND beehiiv_synced_at IS NULL`);
+  const [tosUnchecked] = await rows<{ n: number }>(env, `SELECT COUNT(*) n FROM sources WHERE (active IS NULL OR active=1) AND ingest_method IN ('rss_fulltext','podcast_transcript','bluesky') AND (tos_checked IS NULL OR tos_checked != 1)`);
   const sharers = await rows<{ name: string; medium: string; tips: number; settled: number | null; hit_rate: number | null; score_lower: number | null; tier: string | null }>(env,
     `SELECT s.name, s.medium, COUNT(t.id) tips, sr.n_tips settled, sr.hit_rate, sr.score_lower, sr.tier
        FROM sources s LEFT JOIN tips t ON t.source_id=s.id LEFT JOIN source_ratings sr ON sr.source_id=s.id AND sr.dimension='horizon:90'
@@ -482,6 +483,7 @@ export async function adminDashboard(env: Env): Promise<Response> {
     spentPct >= 90 ? { sev: 'high', kind: 'Budget', t: `LLM spend at ${spentPct}% of cap`, d: 'AI extraction defers until the daily reset (00:00 UTC)', href: '#jobs' } : null,
     reviewTips?.n ? { sev: 'med', kind: 'Review', t: `${reviewTips.n} tip${reviewTips.n === 1 ? '' : 's'} need review`, d: 'Unresolved security — open the review queue (view-only for now)', href: '/admin/approvals' } : null,
     pendPos?.n ? { sev: 'med', kind: 'Pipeline', t: `${pendPos.n} resolved tip${pendPos.n === 1 ? '' : 's'} awaiting a position`, d: 'Run the daily pass below to open + value them', href: '#jobs' } : null,
+    tosUnchecked?.n ? { sev: 'med', kind: 'Sources', t: `${tosUnchecked.n} source${tosUnchecked.n === 1 ? '' : 's'} need a ToS check`, d: 'Auto-polling is paused until verified — open Sources to review + enable', href: '/admin/sources' } : null,
     unsynced?.n ? { sev: 'low', kind: 'Newsletter', t: `${unsynced.n} subscriber${unsynced.n === 1 ? '' : 's'} not synced to beehiiv`, d: 'Runs in the daily cron, or sync now below', href: '#jobs' } : null,
   ].filter(Boolean) as Array<{ sev: string; kind: string; t: string; d: string; href: string }>;
   const sevColor = (s: string) => s === 'high' ? 'var(--bad)' : s === 'med' ? '#c98a00' : 'var(--faint)';
@@ -515,6 +517,12 @@ export async function adminDashboard(env: Env): Promise<Response> {
               <li>Approve or reject any pending real-money trades in <b>Approvals</b>, after checking ticker, notional, source and evidence.</li>
               <li>Reload the page to see updated numbers — the metrics do not live-update after a job runs.</li>
             </ol>
+            <p style="margin:0 0 6px;font-size:13px;color:var(--text-2)"><b>Beyond the daily loop</b> (rail icons, left):</p>
+            <ul style="margin:0 0 12px;padding-left:18px;font-size:13px;color:var(--text-2);line-height:1.6">
+              <li><b>Sources</b> — add where tips come from. Auto-poll feeds only run once you <b>Mark ToS-checked</b> (so they show as “need a ToS check” until you do). Watch each source's health + abstain rate here.</li>
+              <li><b>Add tip</b> — paste a tip you found by hand; set its <b>real publish date</b> and it joins the same pipeline.</li>
+              <li><b>Newsletter</b> — preview the weekly issue, push it to a beehiiv draft (you send it), and see subscriber + publish history.</li>
+            </ul>
             <p class="muted" style="margin-bottom:0;font-size:12px">Hover the ${icon('info', 12)} icons anywhere on this page for a plain-English explanation of each field.</p>
           </div>
         </details>
