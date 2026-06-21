@@ -542,7 +542,10 @@ export default {
       await logOps(env, 'cron', { job: 'daily', ...opened, trades, ...valued, ...risk, nav, ...rated, beehiiv: synced });
     } else {
       const digest = await generateAndStoreDigest(env);
-      await logOps(env, 'cron', { job: 'weekly', ...digest });
+      // On a real (non-quiet, non-cached) issue, also create the beehiiv DRAFT so the founder just
+      // reviews + sends — never auto-sends. Idempotent on week, fail-closed, no-ops if beehiiv unconfigured.
+      const published = digest.ok ? await publishDigestToBeehiiv(env) : null;
+      await logOps(env, 'cron', { job: 'weekly', ...digest, beehiiv: published?.ok ? 'drafted' : published?.reason ?? 'skipped' });
     }
   },
 };

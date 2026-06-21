@@ -10,6 +10,7 @@ export interface Env {
   MAX_DAILY_COST_CENTS: string; // daily LLM/transcription spend ceiling
   EODHD_DAILY_CALL_BUDGET?: string; // soft daily cap on EODHD API calls (0/unset = no cap)
   EXTRACT_MODEL?: string; // override the extraction model (default claude-opus-4-8)
+  DIGEST_MODEL?: string; // model for the weekly newsletter prose (defaults to EXTRACT_MODEL then opus)
   ALPACA_MODE?: string; // "off" (default) | "paper" | "live" — gates broker execution
   ALPACA_NOTIONAL_USD?: string; // fixed $ size per real buy (default 5, hard cap $50)
   MAX_DAILY_TRADES?: string; // aggregate cap: real orders executed per day (code default 5)
