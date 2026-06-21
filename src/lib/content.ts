@@ -16,7 +16,12 @@ const MIN_PUBLIC_TIPS = 5;
 // We feature ~3 named shares per issue (settled outcomes first, then newest still-pending tips).
 const FEATURED_TARGET = 3;
 
-interface ResolvedCall { tie_back_id: string; ticker: string; source: string; direction: string; return_pct: number | null; excess_pct: number | null; is_hit: number | null; horizon_days?: number; as_of?: string }
+interface ResolvedCall {
+  tie_back_id: string; ticker: string; source: string; direction: string;
+  return_pct: number | null; excess_pct: number | null; is_hit: number | null; horizon_days?: number; as_of?: string;
+  // Provenance — so readers can verify the call in its original context.
+  url?: string | null; medium?: string | null; speaker?: string | null;
+}
 
 /** A share featured in "This Week's Three". status='settled' has a real benchmark-based outcome;
  * status='pending' is a newly-tracked call whose outcome hasn't settled yet (honest, no metric). */
@@ -25,6 +30,8 @@ export interface FeaturedShare {
   status: 'settled' | 'pending';
   return_pct: number | null; excess_pct: number | null; is_hit: number | null;
   horizon_days: number | null; detected_at: string | null;
+  // Provenance: where the call was made (source link + medium + named speaker).
+  url: string | null; medium: string | null; speaker: string | null;
 }
 
 export interface FactsPack {
@@ -64,10 +71,11 @@ export async function assembleFactsPack(env: Env, week = isoWeek()): Promise<Fac
   // FEATURE pool surfaces both freshly-matured forward tips AND backfilled history (whose horizons
   // settled at past dates) — a strict 7-day window would miss backfilled outcomes entirely.
   const settledPool = (await env.DB.prepare(
-    `SELECT t.id AS tie_back_id, sec.ticker, s.name AS source, t.direction,
+    `SELECT t.id AS tie_back_id, sec.ticker, s.name AS source, s.medium, t.direction, t.speaker, ii.url,
             tr.return_pct, tr.excess_pct, tr.is_hit, tr.horizon_days, tr.as_of
        FROM tip_returns tr JOIN tips t ON t.id = tr.tip_id
        JOIN sources s ON s.id = t.source_id JOIN securities sec ON sec.id = t.security_id
+       LEFT JOIN ingest_items ii ON ii.id = t.ingest_item_id
       WHERE tr.is_hit IS NOT NULL ORDER BY tr.as_of DESC LIMIT 30`,
   ).all<ResolvedCall>()).results ?? [];
   // "This week" subset (for the Called It / Blew It franchise only).
@@ -83,10 +91,11 @@ export async function assembleFactsPack(env: Env, week = isoWeek()): Promise<Fac
   ).all<ResolvedCall>()).results ?? [];
 
   const opened = (await env.DB.prepare(
-    `SELECT t.id AS tie_back_id, sec.ticker, s.name AS source, t.direction, t.detected_at
+    `SELECT t.id AS tie_back_id, sec.ticker, s.name AS source, s.medium, t.direction, t.speaker, t.detected_at, ii.url
        FROM tips t JOIN sources s ON s.id = t.source_id JOIN securities sec ON sec.id = t.security_id
+       LEFT JOIN ingest_items ii ON ii.id = t.ingest_item_id
       WHERE t.security_id IS NOT NULL AND t.detected_at >= date('now','-7 day') ORDER BY t.detected_at DESC LIMIT 20`,
-  ).all()).results as FactsPack['opened_this_week'] ?? [];
+  ).all<{ tie_back_id: string; ticker: string; source: string; medium: string | null; direction: string; speaker: string | null; detected_at: string; url: string | null }>()).results ?? [];
 
   // Called It / Blew It — strongest + weakest SETTLED call this week. Only show the contrasting pair
   // when there are >=2 distinct settled outcomes, so a 1-settled week never lists the same row as both.
@@ -101,14 +110,14 @@ export async function assembleFactsPack(env: Env, week = isoWeek()): Promise<Fac
   for (const c of settledPool) {
     if (seen.has(c.ticker)) continue;
     seen.add(c.ticker);
-    featured.push({ ticker: c.ticker, source: c.source, direction: c.direction, status: 'settled', return_pct: c.return_pct, excess_pct: c.excess_pct, is_hit: c.is_hit, horizon_days: c.horizon_days ?? null, detected_at: null });
+    featured.push({ ticker: c.ticker, source: c.source, direction: c.direction, status: 'settled', return_pct: c.return_pct, excess_pct: c.excess_pct, is_hit: c.is_hit, horizon_days: c.horizon_days ?? null, detected_at: null, url: c.url ?? null, medium: c.medium ?? null, speaker: c.speaker ?? null });
     if (featured.length >= FEATURED_TARGET) break;
   }
   for (const o of opened) {
     if (featured.length >= FEATURED_TARGET) break;
     if (seen.has(o.ticker)) continue;
     seen.add(o.ticker);
-    featured.push({ ticker: o.ticker, source: o.source, direction: o.direction, status: 'pending', return_pct: null, excess_pct: null, is_hit: null, horizon_days: null, detected_at: o.detected_at });
+    featured.push({ ticker: o.ticker, source: o.source, direction: o.direction, status: 'pending', return_pct: null, excess_pct: null, is_hit: null, horizon_days: null, detected_at: o.detected_at, url: o.url ?? null, medium: o.medium ?? null, speaker: o.speaker ?? null });
   }
 
   // The $1,000 Journey — latest NAV vs ~7 days ago.
@@ -178,6 +187,12 @@ export function renderDigestHtml(pack: FactsPack, week: string): string {
     const sentence = settled
       ? `${escapeHtml(c.source)}. Settled over a ${horizon} horizon &mdash; returned <strong style="color:${INK};">${signPct(c.return_pct)}</strong>, an excess of <strong style="color:${INK};">${signPp(c.excess_pct)}</strong> versus the benchmark.`
       : `${escapeHtml(c.source)}. Newly tracked${c.detected_at ? ` ${escapeHtml(c.detected_at.slice(0, 10))}` : ''} &mdash; outcome still pending.`;
+    // Provenance line: where the call was made, so the reader can verify it in context.
+    const via = [c.speaker && c.speaker !== c.source ? escapeHtml(c.speaker) : null, c.medium ? escapeHtml(c.medium) : null].filter(Boolean).join(' &middot; ');
+    const label = `Source${via ? ` &middot; ${via}` : ''}`;
+    const provenance = c.url
+      ? `<div style="font-family:${F_MONO}; font-size:10px; letter-spacing:0.04em; text-transform:uppercase; margin-top:8px;"><a href="${escapeHtml(c.url)}" style="color:${MUTED}; text-decoration:none;">${label} &rarr;</a></div>`
+      : (via ? `<div style="font-family:${F_MONO}; font-size:10px; letter-spacing:0.04em; text-transform:uppercase; color:${FAINT}; margin-top:8px;">${label}</div>` : '');
     return `<table role="presentation" cellpadding="0" cellspacing="0" border="0" width="100%" style="margin-top:28px; border-top:1px solid ${LINE};"><tr>
       <td style="padding-top:18px; width:64px; vertical-align:top;">
         <div style="font-family:${F_DISPLAY}; font-weight:800; font-size:34px; line-height:0.9; color:#cbc6b9;">${n}</div>
@@ -193,6 +208,7 @@ export function renderDigestHtml(pack: FactsPack, week: string): string {
           </td>
         </tr></table>
         <div style="font-family:${F_BODY}; font-size:13px; line-height:1.55; color:${BODY}; margin-top:12px;">${sentence}</div>
+        ${provenance}
       </td>
     </tr></table>`;
   }).join('');
