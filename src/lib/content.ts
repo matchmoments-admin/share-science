@@ -4,6 +4,7 @@
  * founder reviews + pushes a beehiiv DRAFT. No LLM in the loop: the issue is structured data, so
  * it renders directly from the facts — $0 per issue, deterministic, and inherently report-not-advice.
  */
+import { EmailMessage } from 'cloudflare:email';
 import type { Env } from '../types.js';
 import { nowISO, logOps } from './db.js';
 import { assertFactual, checkFactual } from './advisory.js';
@@ -20,7 +21,7 @@ interface ResolvedCall {
   tie_back_id: string; ticker: string; source: string; direction: string;
   return_pct: number | null; excess_pct: number | null; is_hit: number | null; horizon_days?: number; as_of?: string;
   // Provenance — so readers can verify the call in its original context.
-  url?: string | null; medium?: string | null; speaker?: string | null;
+  url?: string | null; medium?: string | null; speaker?: string | null; evidence?: string | null; mention_seconds?: number | null;
 }
 
 /** A share featured in "This Week's Three". status='settled' has a real benchmark-based outcome;
@@ -30,8 +31,8 @@ export interface FeaturedShare {
   status: 'settled' | 'pending';
   return_pct: number | null; excess_pct: number | null; is_hit: number | null;
   horizon_days: number | null; detected_at: string | null;
-  // Provenance: where the call was made (source link + medium + named speaker).
-  url: string | null; medium: string | null; speaker: string | null;
+  // Provenance: where the call was made + the verbatim quote, so readers can verify it in context.
+  url: string | null; medium: string | null; speaker: string | null; evidence: string | null; mention_seconds: number | null;
 }
 
 export interface FactsPack {
@@ -71,7 +72,7 @@ export async function assembleFactsPack(env: Env, week = isoWeek()): Promise<Fac
   // FEATURE pool surfaces both freshly-matured forward tips AND backfilled history (whose horizons
   // settled at past dates) — a strict 7-day window would miss backfilled outcomes entirely.
   const settledPool = (await env.DB.prepare(
-    `SELECT t.id AS tie_back_id, sec.ticker, s.name AS source, s.medium, t.direction, t.speaker, ii.url,
+    `SELECT t.id AS tie_back_id, sec.ticker, s.name AS source, s.medium, t.direction, t.speaker, t.evidence_span AS evidence, t.mention_seconds, ii.url,
             tr.return_pct, tr.excess_pct, tr.is_hit, tr.horizon_days, tr.as_of
        FROM tip_returns tr JOIN tips t ON t.id = tr.tip_id
        JOIN sources s ON s.id = t.source_id JOIN securities sec ON sec.id = t.security_id
@@ -91,11 +92,11 @@ export async function assembleFactsPack(env: Env, week = isoWeek()): Promise<Fac
   ).all<ResolvedCall>()).results ?? [];
 
   const opened = (await env.DB.prepare(
-    `SELECT t.id AS tie_back_id, sec.ticker, s.name AS source, s.medium, t.direction, t.speaker, t.detected_at, ii.url
+    `SELECT t.id AS tie_back_id, sec.ticker, s.name AS source, s.medium, t.direction, t.speaker, t.detected_at, t.evidence_span AS evidence, t.mention_seconds, ii.url
        FROM tips t JOIN sources s ON s.id = t.source_id JOIN securities sec ON sec.id = t.security_id
        LEFT JOIN ingest_items ii ON ii.id = t.ingest_item_id
       WHERE t.security_id IS NOT NULL AND t.detected_at >= date('now','-7 day') ORDER BY t.detected_at DESC LIMIT 20`,
-  ).all<{ tie_back_id: string; ticker: string; source: string; medium: string | null; direction: string; speaker: string | null; detected_at: string; url: string | null }>()).results ?? [];
+  ).all<{ tie_back_id: string; ticker: string; source: string; medium: string | null; direction: string; speaker: string | null; detected_at: string; evidence: string | null; mention_seconds: number | null; url: string | null }>()).results ?? [];
 
   // Called It / Blew It — strongest + weakest SETTLED call this week. Only show the contrasting pair
   // when there are >=2 distinct settled outcomes, so a 1-settled week never lists the same row as both.
@@ -110,14 +111,14 @@ export async function assembleFactsPack(env: Env, week = isoWeek()): Promise<Fac
   for (const c of settledPool) {
     if (seen.has(c.ticker)) continue;
     seen.add(c.ticker);
-    featured.push({ ticker: c.ticker, source: c.source, direction: c.direction, status: 'settled', return_pct: c.return_pct, excess_pct: c.excess_pct, is_hit: c.is_hit, horizon_days: c.horizon_days ?? null, detected_at: null, url: c.url ?? null, medium: c.medium ?? null, speaker: c.speaker ?? null });
+    featured.push({ ticker: c.ticker, source: c.source, direction: c.direction, status: 'settled', return_pct: c.return_pct, excess_pct: c.excess_pct, is_hit: c.is_hit, horizon_days: c.horizon_days ?? null, detected_at: null, url: c.url ?? null, medium: c.medium ?? null, speaker: c.speaker ?? null, evidence: c.evidence ?? null, mention_seconds: c.mention_seconds ?? null });
     if (featured.length >= FEATURED_TARGET) break;
   }
   for (const o of opened) {
     if (featured.length >= FEATURED_TARGET) break;
     if (seen.has(o.ticker)) continue;
     seen.add(o.ticker);
-    featured.push({ ticker: o.ticker, source: o.source, direction: o.direction, status: 'pending', return_pct: null, excess_pct: null, is_hit: null, horizon_days: null, detected_at: o.detected_at, url: o.url ?? null, medium: o.medium ?? null, speaker: o.speaker ?? null });
+    featured.push({ ticker: o.ticker, source: o.source, direction: o.direction, status: 'pending', return_pct: null, excess_pct: null, is_hit: null, horizon_days: null, detected_at: o.detected_at, url: o.url ?? null, medium: o.medium ?? null, speaker: o.speaker ?? null, evidence: o.evidence ?? null, mention_seconds: o.mention_seconds ?? null });
   }
 
   // The $1,000 Journey — latest NAV vs ~7 days ago.
@@ -166,9 +167,10 @@ const signPct = (frac: number | null) => frac == null ? '—' : `${frac >= 0 ? '
 const signPp = (frac: number | null) => frac == null ? '—' : `${frac >= 0 ? '+' : '−'}${(Math.abs(frac) * 100).toFixed(2)} pp`;
 const ratePct = (frac: number) => `${(frac * 100).toFixed(2).replace(/\.00$/, '')}%`;
 const isBearish = (dir: string) => /sell|bearish|short/i.test(dir);
+const fmtMMSS = (sec: number) => `${Math.floor(sec / 60)}:${String(Math.floor(sec % 60)).padStart(2, '0')}`;
 
 /** Render the FactsPack as the "Editorial" weekly email (Variation B). Deterministic + factual. */
-export function renderDigestHtml(pack: FactsPack, week: string): string {
+export function renderDigestHtml(pack: FactsPack, week: string): { html: string; gateText: string } {
   const total = pack.featured.length;
   const nSettled = pack.featured.filter((f) => f.status === 'settled').length;
   const eyebrow = `This Week&rsquo;s ${cap(word(total || 0))}`;
@@ -176,6 +178,10 @@ export function renderDigestHtml(pack: FactsPack, week: string): string {
     : nSettled === total ? `${cap(word(total))} call${total === 1 ? '' : 's'}<br>have settled.`
     : nSettled === 0 ? `${cap(word(total))} new call${total === 1 ? '' : 's'}<br>tracked.`
     : `${cap(word(total))} calls<br>this week.`;
+
+  // gateParts = OUR authored copy only; the compliance gate runs on this. Verbatim source quotes are
+  // attributed reporting (not our recommendation), so they're rendered but EXCLUDED from the gate.
+  const gateParts: string[] = [headline];
 
   const calls = pack.featured.map((c, i) => {
     const n = String(i + 1).padStart(2, '0');
@@ -187,11 +193,16 @@ export function renderDigestHtml(pack: FactsPack, week: string): string {
     const sentence = settled
       ? `${escapeHtml(c.source)}. Settled over a ${horizon} horizon &mdash; returned <strong style="color:${INK};">${signPct(c.return_pct)}</strong>, an excess of <strong style="color:${INK};">${signPp(c.excess_pct)}</strong> versus the benchmark.`
       : `${escapeHtml(c.source)}. Newly tracked${c.detected_at ? ` ${escapeHtml(c.detected_at.slice(0, 10))}` : ''} &mdash; outcome still pending.`;
-    // Provenance line: where the call was made, so the reader can verify it in context.
+    gateParts.push(sentence);
+    // Verbatim quote (attributed; escaped; truncated) so readers can verify the call's context.
+    const quote = c.evidence ? `<div style="font-family:${F_BODY}; font-size:12px; line-height:1.5; font-style:italic; color:#76736a; margin-top:10px; padding-left:12px; border-left:2px solid ${LINE};">&ldquo;${escapeHtml(c.evidence.slice(0, 220))}${c.evidence.length > 220 ? '&hellip;' : ''}&rdquo;</div>` : '';
+    // Provenance: source link (+ podcast timestamp deep-link) so the call is verifiable in context.
+    const ts = (c.medium || '').toLowerCase().includes('podcast') && c.mention_seconds != null && c.mention_seconds >= 0 ? c.mention_seconds : null;
+    const href = c.url ? (ts != null ? `${c.url}${c.url.includes('?') ? '&' : '?'}t=${ts}` : c.url) : null;
     const via = [c.speaker && c.speaker !== c.source ? escapeHtml(c.speaker) : null, c.medium ? escapeHtml(c.medium) : null].filter(Boolean).join(' &middot; ');
-    const label = `Source${via ? ` &middot; ${via}` : ''}`;
-    const provenance = c.url
-      ? `<div style="font-family:${F_MONO}; font-size:10px; letter-spacing:0.04em; text-transform:uppercase; margin-top:8px;"><a href="${escapeHtml(c.url)}" style="color:${MUTED}; text-decoration:none;">${label} &rarr;</a></div>`
+    const label = `Source${via ? ` &middot; ${via}` : ''}${ts != null ? ` &middot; at ${fmtMMSS(ts)}` : ''}`;
+    const provenance = href
+      ? `<div style="font-family:${F_MONO}; font-size:10px; letter-spacing:0.04em; text-transform:uppercase; margin-top:8px;"><a href="${escapeHtml(href)}" style="color:${MUTED}; text-decoration:none;">${label} &rarr;</a></div>`
       : (via ? `<div style="font-family:${F_MONO}; font-size:10px; letter-spacing:0.04em; text-transform:uppercase; color:${FAINT}; margin-top:8px;">${label}</div>` : '');
     return `<table role="presentation" cellpadding="0" cellspacing="0" border="0" width="100%" style="margin-top:28px; border-top:1px solid ${LINE};"><tr>
       <td style="padding-top:18px; width:64px; vertical-align:top;">
@@ -208,6 +219,7 @@ export function renderDigestHtml(pack: FactsPack, week: string): string {
           </td>
         </tr></table>
         <div style="font-family:${F_BODY}; font-size:13px; line-height:1.55; color:${BODY}; margin-top:12px;">${sentence}</div>
+        ${quote}
         ${provenance}
       </td>
     </tr></table>`;
@@ -236,7 +248,7 @@ export function renderDigestHtml(pack: FactsPack, week: string): string {
   </tr></table>`).join('');
   const horizonBlock = pack.horizon_report.length ? `<div style="font-family:${F_MONO}; font-size:10px; letter-spacing:0.14em; text-transform:uppercase; color:${FAINT}; margin-top:34px;">The Horizon Report</div>${horizonRows}` : '';
 
-  return `<!DOCTYPE html><html><head><meta charset="utf-8"><meta name="viewport" content="width=device-width, initial-scale=1">
+  const html = `<!DOCTYPE html><html><head><meta charset="utf-8"><meta name="viewport" content="width=device-width, initial-scale=1">
 <title>Shareo Weekly &mdash; ${escapeHtml(week)}</title>
 <link href="https://fonts.googleapis.com/css2?family=Saira+Condensed:wght@700;800&family=Public+Sans:wght@400;600;700&family=IBM+Plex+Mono:wght@400;500&display=swap" rel="stylesheet">
 </head><body style="margin:0; background:${PAGE};">
@@ -261,6 +273,34 @@ export function renderDigestHtml(pack: FactsPack, week: string): string {
 </td></tr></table>
 </td></tr></table>
 </body></html>`;
+  return { html, gateText: gateParts.join('\n') };
+}
+
+/** Send the stored issue to the founder's TEST_EMAIL via the Cloudflare Email binding. No-ops
+ * cleanly (reason='email_not_configured') until the SEND_EMAIL binding + TEST_EMAIL are set up. */
+export async function sendTestDigest(env: Env, week = isoWeek()): Promise<{ ok: boolean; reason?: string }> {
+  if (!env.SEND_EMAIL || !env.TEST_EMAIL) return { ok: false, reason: 'email_not_configured' };
+  const from = env.EMAIL_FROM || 'newsletter@shareo.co';
+  const obj = await env.RAW_MEDIA.get(`digests/${week}.html`);
+  if (!obj) return { ok: false, reason: 'no_draft' };
+  const html = await obj.text();
+  const raw = [
+    `From: Shareo <${from}>`,
+    `To: ${env.TEST_EMAIL}`,
+    `Subject: [TEST] Shareo Weekly — ${week}`,
+    'MIME-Version: 1.0',
+    'Content-Type: text/html; charset=utf-8',
+    '',
+    html,
+  ].join('\r\n');
+  try {
+    await env.SEND_EMAIL.send(new EmailMessage(from, env.TEST_EMAIL, raw));
+    await logOps(env, 'publish', { week, test_sent_to: env.TEST_EMAIL });
+    return { ok: true };
+  } catch (err) {
+    await logOps(env, 'error', { at: 'sendTestDigest', week, err: String(err) });
+    return { ok: false, reason: String(err).slice(0, 200) };
+  }
 }
 
 /** Assemble → render the Editorial email → compliance gate → store HTML in R2. Deterministic, no LLM. */
@@ -280,15 +320,15 @@ export async function generateAndStoreDigest(env: Env, week = isoWeek(), force =
     await logOps(env, 'publish', { week, skipped: 'quiet_week_no_content' });
     return { ok: false, week, reason: 'quiet_week_no_content' };
   }
-  const html = renderDigestHtml(pack, week);
-  // Belt-and-suspenders: the render is deterministic + factual, but still gate it (e.g. a source name
-  // that happened to contain advice language would block rather than ship).
-  const verdict = checkFactual(html);
+  const { html, gateText } = renderDigestHtml(pack, week);
+  // Gate OUR authored copy (gateText), not the verbatim source quotes embedded in the HTML — those are
+  // attributed reporting, not our recommendation, so they're rendered but exempt from the advice gate.
+  const verdict = checkFactual(gateText);
   if (!verdict.ok) {
     await logOps(env, 'compliance', { week, blocked: 'advice_language', violations: verdict.violations });
     return { ok: false, week, reason: `advice_language: ${verdict.violations.join(', ')}` };
   }
-  assertFactual(html);
+  assertFactual(gateText);
 
   await env.RAW_MEDIA.put(key, html, { httpMetadata: { contentType: 'text/html; charset=utf-8' } });
   await logOps(env, 'publish', { week, key, featured: pack.featured.length, settled: pack.settled_this_week.length, top_sources: pack.top_sources.length });

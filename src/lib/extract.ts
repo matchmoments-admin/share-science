@@ -31,11 +31,12 @@ const TIP_ITEM = {
     target_price: { type: ['number', 'null'], description: 'Explicit price target if stated (a number, in the security currency), else null. Never invent one.' },
     target_currency: { type: ['string', 'null'], description: "Currency of target_price (e.g. 'USD','AUD') if stated, else null." },
     rationale: { type: ['string', 'null'], description: 'One-sentence summary of the stated reasoning.' },
-    evidence_span: { type: 'string', description: 'Verbatim quote expressing THIS view.' },
+    evidence_span: { type: 'string', description: 'Verbatim quote expressing THIS view. Do NOT include any leading [mm:ss] timestamp marker in the quote itself.' },
     speaker: { type: ['string', 'null'], description: 'Name of the person who made THIS specific call, if identifiable, else null.' },
+    mention_seconds: { type: ['number', 'null'], description: 'If transcript lines are prefixed with [mm:ss] markers, the approximate START time IN SECONDS of the line where this view is expressed (e.g. [12:34] → 754). null if there are no timestamp markers.' },
     confidence: { type: 'number', description: '0..1 confidence this is a genuine, correctly-extracted call.' },
   },
-  required: ['proposed_ticker', 'exchange_hint', 'company_name', 'direction', 'conviction', 'horizon', 'tip_type', 'target_price', 'target_currency', 'rationale', 'evidence_span', 'speaker', 'confidence'],
+  required: ['proposed_ticker', 'exchange_hint', 'company_name', 'direction', 'conviction', 'horizon', 'tip_type', 'target_price', 'target_currency', 'rationale', 'evidence_span', 'speaker', 'mention_seconds', 'confidence'],
 };
 
 const RECORD_TIPS_TOOL: Anthropic.Tool = {
@@ -111,6 +112,7 @@ function coerce(input: unknown): ExtractedTip {
     rationale: strOrNull(o.rationale),
     evidence_span: typeof o.evidence_span === 'string' ? o.evidence_span : '',
     speaker: strOrNull(o.speaker),
+    mention_seconds: typeof o.mention_seconds === 'number' && isFinite(o.mention_seconds) && o.mention_seconds >= 0 ? Math.round(o.mention_seconds) : null,
     confidence: typeof o.confidence === 'number' && isFinite(o.confidence) ? Math.max(0, Math.min(1, o.confidence)) : 0,
   };
 }

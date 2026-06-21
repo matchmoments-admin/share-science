@@ -4,11 +4,14 @@ export interface Env {
   RAW_MEDIA: R2Bucket;
   KV: KVNamespace;
   TIP_INGEST: Queue<TipIngestMessage>;
+  SEND_EMAIL?: SendEmail; // Cloudflare Email Sending binding (optional) — for "send test to me"
 
   // vars
   PUBLIC_PRICES: string; // "on" | "off" — gates raw-price display (default off)
   MAX_DAILY_COST_CENTS: string; // daily LLM/transcription spend ceiling
   EODHD_DAILY_CALL_BUDGET?: string; // soft daily cap on EODHD API calls (0/unset = no cap)
+  TEST_EMAIL?: string; // founder address for "send test to me"
+  EMAIL_FROM?: string; // verified From address for outbound email (e.g. newsletter@shareo.co)
   EXTRACT_MODEL?: string; // override the extraction model (default claude-opus-4-8)
   DIGEST_MODEL?: string; // model for the weekly newsletter prose (defaults to EXTRACT_MODEL then opus)
   ALPACA_MODE?: string; // "off" (default) | "paper" | "live" — gates broker execution
@@ -75,5 +78,6 @@ export interface ExtractedTip {
   rationale: string | null;
   evidence_span: string;
   speaker: string | null; // analyst/author who made THIS call (for per-speaker leaderboards later)
+  mention_seconds: number | null; // podcast offset (s) where the call was made, from [mm:ss] markers; null otherwise
   confidence: number; // 0..1
 }

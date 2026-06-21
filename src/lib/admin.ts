@@ -1080,6 +1080,7 @@ export async function adminNewsletter(env: Env): Promise<Response> {
           <button data-act="/admin/run-weekly?week=${wk}${hasDraft ? '&force=1' : ''}"${hasDraft ? ' data-confirm="Regenerate this week\'s issue from the latest data? Overwrites the stored draft (free — no LLM)."' : ''}>${hasDraft ? 'Regenerate this week' : 'Generate this week'}</button>
           ${hasDraft ? `<a class="btn ghost" href="/admin/digest?week=${wk}" target="_blank" rel="noopener">Preview draft ↗</a>` : ''}
           <button class="ghost" data-act="/admin/publish-digest?week=${wk}" data-confirm="Create a beehiiv DRAFT for ${escapeHtml(week)}? It will NOT send — you review + send in beehiiv.">Push to beehiiv draft</button>
+          ${hasDraft ? `<button class="ghost" data-act="/admin/send-test-digest?week=${wk}">Send test to me</button>` : ''}
           <button class="ghost" data-act="/admin/sync-subscribers">Sync subscribers${subUnsynced ? ` (${subUnsynced})` : ''}</button>
         </div><pre id="out" class="muted" style="margin-top:12px">The issue renders deterministically from the ledger (the Editorial email template) — free, no LLM, and it passes the compliance gate. A blocked issue shows its reason here. beehiiv calls are free and never auto-send.</pre></div></section>
 

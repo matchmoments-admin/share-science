@@ -22,7 +22,7 @@ import { pollBlueskySources } from './lib/producers/bluesky.js';
 import { pollPodcastSources } from './lib/producers/podcast.js';
 import { leaderboard, leaderboardJson, navJson, sourcePage, tipPage, securityPage, methodologyPage } from './lib/pages.js';
 import { landingPage, handleSubscribe, syncSubscribersToBeehiiv } from './lib/landing.js';
-import { generateAndStoreDigest, publishDigestToBeehiiv } from './lib/content.js';
+import { generateAndStoreDigest, publishDigestToBeehiiv, sendTestDigest } from './lib/content.js';
 import { adminCookie, adminDashboard, adminApprovals, adminTrading, adminErrors, adminSources, adminAddTip, adminNewsletter, adminSubscribers, adminLoginPage, handleAdminLogin, handleAdminLogout } from './lib/admin.js';
 
 const EXTRACT_BUDGET_CENTS = 5; // headroom before an extraction call (multi-tip ≈ a few cents)
@@ -301,12 +301,12 @@ async function consumeOne(env: Env, m: TipIngestMessage): Promise<void> {
         `INSERT OR IGNORE INTO tips
            (id, security_id, source_id, ingest_item_id, direction, conviction, horizon, tip_type,
             horizon_days_target, target_price_raw, target_currency, rationale, evidence_span, speaker,
-            confidence, extractor, detected_at, status, resolve_reason, created_at)
-         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+            mention_seconds, confidence, extractor, detected_at, status, resolve_reason, created_at)
+         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
       ).bind(
         uid(), security?.id ?? null, m.source_id, m.ingest_item_id, tip.direction, tip.conviction, tip.horizon,
         tip.tip_type, tip.horizon_days_target, tip.target_price, tip.target_currency, tip.rationale,
-        tip.evidence_span, tip.speaker, tip.confidence, model, m.detected_at,
+        tip.evidence_span, tip.speaker, tip.mention_seconds, tip.confidence, model, m.detected_at,
         security ? 'resolved' : 'review', reason ?? null, nowISO(),
       ).run();
     } catch (err) {
@@ -351,6 +351,13 @@ async function handlePublishDigest(req: Request, env: Env): Promise<Response> {
   if (!authed(req, env)) return json({ error: 'unauthorized' }, 401);
   const week = new URL(req.url).searchParams.get('week') || undefined;
   return json(await publishDigestToBeehiiv(env, week));
+}
+
+/** Admin: email this week's stored issue to the founder's TEST_EMAIL (Cloudflare Email binding). */
+async function handleSendTestDigest(req: Request, env: Env): Promise<Response> {
+  if (!authed(req, env)) return json({ error: 'unauthorized' }, 401);
+  const week = new URL(req.url).searchParams.get('week') || undefined;
+  return json(await sendTestDigest(env, week));
 }
 
 /** Admin: push not-yet-synced subscribers to beehiiv (same bounded pass as the daily cron). */
@@ -484,6 +491,7 @@ export default {
     if (url.pathname === '/admin/run-weekly' && req.method === 'POST') return handleRunWeekly(req, env);
     if (url.pathname === '/admin/digest' && req.method === 'GET') return handleDigest(req, env);
     if (url.pathname === '/admin/publish-digest' && req.method === 'POST') return handlePublishDigest(req, env);
+    if (url.pathname === '/admin/send-test-digest' && req.method === 'POST') return handleSendTestDigest(req, env);
     if (url.pathname === '/admin/sync-subscribers' && req.method === 'POST') return handleSyncSubscribers(req, env);
     if (url.pathname === '/admin/seed-securities' && req.method === 'POST') return handleSeedSecurities(req, env);
     if (url.pathname === '/admin/poll' && req.method === 'POST') return handlePoll(req, env);

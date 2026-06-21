@@ -97,10 +97,12 @@ interface Transcription {
   costCents: number;
 }
 
-/** Deepgram URL transcription (Deepgram fetches the audio itself — no download on our side). */
+/** Deepgram URL transcription (Deepgram fetches the audio itself — no download on our side).
+ * Requests utterances so we can prefix each segment with an [mm:ss] marker — the extractor uses these
+ * to record where in the episode a call was made (so the newsletter can deep-link "at mm:ss"). */
 async function transcribe(env: Env, audioUrl: string): Promise<Transcription> {
   if (!isSafePublicUrl(audioUrl)) throw new Error('unsafe_audio_url'); // defense-in-depth (SSRF)
-  const resp = await fetch('https://api.deepgram.com/v1/listen?model=nova-3&smart_format=true&punctuate=true', {
+  const resp = await fetch('https://api.deepgram.com/v1/listen?model=nova-3&smart_format=true&punctuate=true&utterances=true', {
     method: 'POST',
     headers: { authorization: `Token ${env.DEEPGRAM_API_KEY}`, 'content-type': 'application/json' },
     body: JSON.stringify({ url: audioUrl }),
@@ -108,9 +110,18 @@ async function transcribe(env: Env, audioUrl: string): Promise<Transcription> {
   if (!resp.ok) throw new Error(`deepgram ${resp.status}`);
   const data = (await resp.json()) as {
     metadata?: { duration?: number };
-    results?: { channels?: Array<{ alternatives?: Array<{ transcript?: string }> }> };
+    results?: { channels?: Array<{ alternatives?: Array<{ transcript?: string }> }>; utterances?: Array<{ start?: number; transcript?: string }> };
   };
-  const transcript = data.results?.channels?.[0]?.alternatives?.[0]?.transcript ?? '';
+  const utterances = data.results?.utterances ?? [];
+  // Prefer a timestamped transcript ([mm:ss] per utterance) so the extractor can locate each call.
+  const transcript = utterances.length
+    ? utterances.map((u) => `[${mmss(u.start ?? 0)}] ${u.transcript ?? ''}`.trim()).join('\n')
+    : (data.results?.channels?.[0]?.alternatives?.[0]?.transcript ?? '');
   const minutes = (data.metadata?.duration ?? 0) / 60;
   return { transcript, costCents: minutes * DEEPGRAM_CENTS_PER_MIN };
+}
+
+/** seconds → "m:ss" for transcript markers. */
+function mmss(sec: number): string {
+  return `${Math.floor(sec / 60)}:${String(Math.floor(sec % 60)).padStart(2, '0')}`;
 }

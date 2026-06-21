@@ -27,6 +27,13 @@ EXTRACT_MODEL = "claude-haiku-4-5"  # tip extraction model (high-volume, strict 
 DIGEST_MODEL = "claude-opus-4-8"  # once-weekly newsletter prose — Opus for quality; ~6c/issue, gated by DRAFT_BUDGET_CENTS. Cost is now metered at the model's real rate.
 ALPACA_MODE = "paper"      # off | paper | live  — paper-api.alpaca.markets (simulated, no real money)
 ALPACA_NOTIONAL_USD = "5"  # $ per real buy (hard-capped at $50 in code)
+# Newsletter "send test to me" (optional). Uncomment + set once Cloudflare Email Sending is enabled
+# and shareo.co's DKIM/SPF are verified; until then the button reports "email_not_configured".
+# EMAIL_FROM = "newsletter@shareo.co"   # verified sender on the zone
+# TEST_EMAIL = "you@example.com"        # founder address to receive the test (or set as a secret)
+
+# [[send_email]]                         # binds env.SEND_EMAIL — requires Cloudflare Email Sending setup
+# name = "SEND_EMAIL"
 # Turnstile: set the public site key here to render the /api/subscribe widget, and
 # `wrangler secret put TURNSTILE_SECRET_KEY` for server-side verify. Both unset ⇒ fail-open (no widget).
 # TURNSTILE_SITE_KEY = "0x..."
