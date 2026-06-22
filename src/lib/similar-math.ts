@@ -71,6 +71,40 @@ export function cosine(a: Map<Feature, number>, b: Map<Feature, number>): number
   return dot / (Math.sqrt(na) * Math.sqrt(nb));
 }
 
+/** A security's business classification (from the LLM tagging) for similarity scoring. */
+export interface ClassRow {
+  sector: string | null;
+  industry: string | null;
+  sub_industry: string | null;
+  tags: string[];
+}
+
+/** Jaccard overlap of two tag lists (0..1); 0 when either is empty. */
+export function tagJaccard(a: string[], b: string[]): number {
+  if (!a.length || !b.length) return 0;
+  const sa = new Set(a);
+  const sb = new Set(b);
+  let inter = 0;
+  for (const t of sa) if (sb.has(t)) inter++;
+  const union = sa.size + sb.size - inter;
+  return union === 0 ? 0 : inter / union;
+}
+
+/**
+ * Business-similarity of two securities, 0..1. A tiered taxonomy match (same sub-industry > same
+ * industry > same sector) is the backbone; tag Jaccard refines ranking within a tier. Returns 0 when
+ * the companies share no taxonomy level and no tags (genuinely unrelated) — the compute drops those.
+ */
+export function classificationScore(a: ClassRow, b: ClassRow): number {
+  const eq = (x: string | null, y: string | null) => !!x && !!y && x.toLowerCase() === y.toLowerCase();
+  const base = eq(a.sub_industry, b.sub_industry) ? 1
+    : eq(a.industry, b.industry) ? 0.65
+    : eq(a.sector, b.sector) ? 0.35
+    : 0;
+  const jac = tagJaccard(a.tags, b.tags);
+  return clamp(0.7 * base + 0.3 * jac, 0, 1);
+}
+
 /** Pearson correlation over the dates common to both return maps; null if too little overlap. */
 export function correlation(a: Map<string, number>, b: Map<string, number>, minOverlap: number): number | null {
   const xs: number[] = [];

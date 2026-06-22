@@ -156,13 +156,16 @@ export function methodologyPage(): Response {
 
     <h2>Finding similar shares</h2>
     <p>The <a href="/similar">Find similar shares</a> tool answers "what else is like this?" for a US-listed
-      ticker — reproducibly, not by opinion. Today it ranks peers by <b>price co-movement</b>: how closely
-      each share's daily returns have tracked the one you entered over the past ~year (a statistical
-      correlation). Shares that consistently move together tend to share real drivers, so this surfaces a
-      stock's genuine market neighbourhood (e.g. a memory-chip name returns other memory and semiconductor-
-      equipment names). A second, complementary signal — matching companies on <b>financial characteristics</b>
-      (size, valuation, growth, profitability, leverage, compared within sector) — is built and switches on
-      when our data plan includes it; the two then combine into a blended rank.</p>
+      ticker — reproducibly, not by opinion. It combines two complementary signals into a <b>blended</b> rank:</p>
+    <p><b>Price co-movement</b> — how closely each share's daily returns have tracked the one you entered over
+      the past ~year (a statistical correlation). Shares that consistently move together tend to share real
+      drivers, so this surfaces a stock's genuine market neighbourhood. It measures behaviour, though, so it can
+      occasionally include a name from another industry that simply moved in sympathy.</p>
+    <p><b>Business class</b> — how closely each company matches by what it actually does: industry, finer
+      sub-industry, and business keywords (e.g. a memory-chip maker matches other semiconductor and chip-
+      equipment names, and an unrelated industrial that merely co-moved is filtered out). This is the
+      "same kind of company" signal. A further measure based on detailed <b>financial characteristics</b>
+      (size, valuation, growth, profitability, leverage) switches on if our data plan includes it.</p>
     <p>For each peer we also overlay <b>which tracked tipsters have called it</b> and the best 90-day alpha
       among those calls — connecting peer discovery to our audited track record. This is descriptive,
       factual information about share characteristics and past outcomes. It is <b>not</b> a recommendation,
@@ -311,9 +314,10 @@ export async function securityPage(env: Env, ticker: string): Promise<Response> 
 }
 
 // ── Find Similar Shares ──────────────────────────────────────────────
-const SIMILAR_METHODS = ['blended', 'fundamental', 'correlation'];
+// 'blended' is the synthesis; these are its inputs. Order = display order / default preference.
+const SIMILAR_INPUT_METHODS = ['fundamental', 'classification', 'correlation'];
 const SIMILAR_METHOD_LABELS: Record<string, string> = {
-  blended: 'Blended', fundamental: 'Fundamental factors', correlation: 'Price co-movement',
+  blended: 'Blended', fundamental: 'Fundamental factors', classification: 'Business class', correlation: 'Price co-movement',
 };
 
 interface PeerRow {
@@ -321,6 +325,14 @@ interface PeerRow {
   ticker: string; name: string; sector: string | null;
 }
 interface Overlay { n_calls: number; n_sources: number; best_alpha: number | null }
+interface ClassLabel { sector: string | null; industry: string | null; sub_industry: string | null }
+
+/** "Sector · Sub-industry" (or the best available level) for display; '' when unclassified. */
+function classText(c: ClassLabel | undefined): string {
+  if (!c) return '';
+  const parts = [c.sector, c.sub_industry || c.industry].filter(Boolean);
+  return parts.join(' · ');
+}
 
 /**
  * Resolve a US security + its precomputed peers. The signal options shown are DATA-DRIVEN: we only
@@ -329,7 +341,7 @@ interface Overlay { n_calls: number; n_sources: number; best_alpha: number | nul
  * option rather than showing redundant/dead choices.
  */
 async function loadSimilar(env: Env, ticker: string, methodParam?: string | null): Promise<
-  { sec: any; method: string; offered: string[]; peers: PeerRow[]; overlay: Map<string, Overlay> } | null
+  { sec: any; method: string; offered: string[]; peers: PeerRow[]; overlay: Map<string, Overlay>; classes: Map<string, ClassLabel> } | null
 > {
   // US-market exchanges as stored (legacy XNAS/XNYS vs the EODHD 'US' code) — must match similar.ts.
   const sec = await env.DB.prepare(
@@ -342,10 +354,10 @@ async function loadSimilar(env: Env, ticker: string, methodParam?: string | null
     'SELECT DISTINCT method FROM similar_securities WHERE security_id = ?',
   ).bind(sec.id).all<{ method: string }>()).results ?? [];
   const avail = new Set(availRows.map((r) => r.method));
-  // With fundamentals present: offer blend + both inputs. Without: blend == correlation → show one.
-  const offered = avail.has('fundamental')
-    ? SIMILAR_METHODS.filter((m) => avail.has(m))
-    : avail.has('correlation') ? ['correlation'] : [...avail];
+  // Offer 'blended' only when ≥2 input signals exist (otherwise blended == its single input — redundant).
+  // Then list whichever inputs are present. Default = the first offered (blended when available).
+  const inputs = SIMILAR_INPUT_METHODS.filter((m) => avail.has(m));
+  const offered = inputs.length >= 2 ? ['blended', ...inputs] : inputs;
   const method = methodParam && offered.includes(methodParam) ? methodParam : (offered[0] ?? 'blended');
 
   const peers = (await env.DB.prepare(
@@ -354,27 +366,34 @@ async function loadSimilar(env: Env, ticker: string, methodParam?: string | null
       WHERE ss.security_id = ? AND ss.method = ? ORDER BY ss.rank ASC`,
   ).bind(sec.id, method).all<PeerRow>()).results ?? [];
 
-  // Tipster overlay — for each peer, how many tracked calls + best 90d alpha by any source (derived only).
   const overlay = new Map<string, Overlay>();
+  const classes = new Map<string, ClassLabel>();
   if (peers.length) {
-    const ids = peers.map((p) => p.peer_id);
+    const ids = [sec.id, ...peers.map((p) => p.peer_id)];
     const ph = ids.map(() => '?').join(',');
-    const rows = (await env.DB.prepare(
+    // Tipster overlay — for each peer, how many tracked calls + best 90d alpha by any source (derived only).
+    const ov = (await env.DB.prepare(
       `SELECT t.security_id, COUNT(DISTINCT t.id) AS n_calls, COUNT(DISTINCT t.source_id) AS n_sources,
               MAX(tr.excess_pct) AS best_alpha
          FROM tips t LEFT JOIN tip_returns tr ON tr.tip_id = t.id AND tr.horizon_days = 90
         WHERE t.security_id IN (${ph}) GROUP BY t.security_id`,
     ).bind(...ids).all<{ security_id: string; n_calls: number; n_sources: number; best_alpha: number | null }>()).results ?? [];
-    for (const r of rows) overlay.set(r.security_id, { n_calls: r.n_calls, n_sources: r.n_sources, best_alpha: r.best_alpha });
+    for (const r of ov) overlay.set(r.security_id, { n_calls: r.n_calls, n_sources: r.n_sources, best_alpha: r.best_alpha });
+    // Business-classification labels for the queried security + each peer (the "Semiconductors" tag).
+    const cl = (await env.DB.prepare(
+      `SELECT security_id, sector, industry, sub_industry FROM security_classification WHERE security_id IN (${ph})`,
+    ).bind(...ids).all<{ security_id: string; sector: string | null; industry: string | null; sub_industry: string | null }>()).results ?? [];
+    for (const r of cl) classes.set(r.security_id, { sector: r.sector, industry: r.industry, sub_industry: r.sub_industry });
   }
-  return { sec, method, offered, peers, overlay };
+  return { sec, method, offered, peers, overlay, classes };
 }
 
 /** Plain-English description of what a similarity signal measures (shown on the page). */
 function methodExplain(method: string): string {
   if (method === 'correlation') return "how closely each share's daily price has moved together with it over the past year";
+  if (method === 'classification') return 'how closely each company matches it by industry and business type';
   if (method === 'fundamental') return 'how alike each company is on size, valuation, growth, profitability and leverage (compared within its sector)';
-  return 'a blend of price co-movement and similar financial characteristics';
+  return 'a blend of the available signals — business type and how their prices have moved together';
 }
 
 export async function similarPage(env: Env, tickerParam?: string | null, methodParam?: string | null): Promise<Response> {
@@ -394,8 +413,9 @@ export async function similarPage(env: Env, tickerParam?: string | null, methodP
   const data = await loadSimilar(env, ticker, methodParam);
   if (!data) return layout('Find similar shares', intro +
     `<p class="muted">No US security found for <b>${escapeHtml(ticker.toUpperCase())}</b> in our universe yet.</p>`);
-  const { sec, method, offered, peers, overlay } = data;
+  const { sec, method, offered, peers, overlay, classes } = data;
   assertNoRawPrices(env, { peers, overlay: [...overlay.values()] });
+  const secClass = escapeHtml(classText(classes.get(sec.id)) || sec.sector || '');
 
   if (peers.length === 0) {
     return layout(`Similar to ${sec.ticker}`, intro +
@@ -422,16 +442,16 @@ export async function similarPage(env: Env, tickerParam?: string | null, methodP
       <td>${p.rank}</td>
       <td><a href="/securities/${encodeURIComponent(p.ticker)}">${escapeHtml(p.ticker)}</a></td>
       <td>${escapeHtml(p.name)}</td>
-      <td class="muted">${escapeHtml(p.sector || '—')}</td>
+      <td class="muted">${escapeHtml(classText(classes.get(p.peer_id)) || p.sector || '—')}</td>
       <td>${score(p.score * 100)}</td>
       <td>${tipster} ${o && o.n_calls > 0 ? `<a class="muted" href="/securities/${encodeURIComponent(p.ticker)}">view</a>` : ''}</td>
     </tr>`;
   }).join('');
 
   return layout(`Similar to ${sec.ticker}`, intro +
-    `<h2>Shares similar to ${escapeHtml(sec.ticker)} <span class="muted">${escapeHtml(sec.name)}${sec.sector ? ' · ' + escapeHtml(sec.sector) : ''}</span></h2>
+    `<h2>Shares similar to ${escapeHtml(sec.ticker)} <span class="muted">${escapeHtml(sec.name)}${secClass ? ' · ' + secClass : ''}</span></h2>
      ${switcher}
-     <table><thead><tr><th>#</th><th>Ticker</th><th>Company</th><th>Sector</th>
+     <table><thead><tr><th>#</th><th>Ticker</th><th>Company</th><th>Sector / industry</th>
        <th>Similarity</th><th>Tracked tipster calls</th></tr></thead><tbody>${rowsHtml}</tbody></table>
      <p class="muted"><b>Similarity</b> is a 0–100 index of ${escapeHtml(methodExplain(method))} (higher = more alike).
        The <b>Tracked tipster calls</b> column shows how many tracked public calls each peer has, from how many
@@ -446,18 +466,21 @@ export async function similarJson(env: Env, tickerParam?: string | null, methodP
   if (!ticker) return json({ error: 'missing ?ticker=' }, 400);
   const data = await loadSimilar(env, ticker, methodParam);
   if (!data) return json({ error: 'not_found', ticker: ticker.toUpperCase() }, 404);
-  const { sec, method, peers, overlay } = data;
+  const { sec, method, peers, overlay, classes } = data;
   const out = peers.map((p) => {
     const o = overlay.get(p.peer_id);
+    const c = classes.get(p.peer_id);
     return {
-      ticker: p.ticker, name: p.name, sector: p.sector, rank: p.rank,
+      ticker: p.ticker, name: p.name, rank: p.rank,
+      sector: c?.sector ?? p.sector, industry: c?.industry ?? null, sub_industry: c?.sub_industry ?? null,
       similarity: Math.round(p.score * 1000) / 10, // 0..100, 1dp
       tipster: { n_calls: o?.n_calls ?? 0, n_sources: o?.n_sources ?? 0, best_90d_alpha_pct: o?.best_alpha ?? null },
     };
   });
   assertNoRawPrices(env, out);
+  const qc = classes.get(sec.id);
   return json({
-    query: { ticker: sec.ticker, name: sec.name, sector: sec.sector }, method,
+    query: { ticker: sec.ticker, name: sec.name, sector: qc?.sector ?? sec.sector, industry: qc?.industry ?? null, sub_industry: qc?.sub_industry ?? null }, method,
     hypothetical: true, disclaimer: HYPOTHETICAL_NOTE, peers: out,
   });
 }

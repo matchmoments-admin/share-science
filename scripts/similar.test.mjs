@@ -1,7 +1,7 @@
 // Unit goldens for the similarity math (within-sector z-score + cosine). Run: npm test
 import test from 'node:test';
 import assert from 'node:assert/strict';
-import { zScoreGroup, cosine, correlation } from '../src/lib/similar-math.ts';
+import { zScoreGroup, cosine, correlation, classificationScore, tagJaccard } from '../src/lib/similar-math.ts';
 
 // Build a FundRow from a partial; unset factors are null (the "missing" case).
 function mk(id, f) {
@@ -43,6 +43,31 @@ test('missing factors are treated as the sector mean (z=0), never crash', () => 
 test('cosine of a zero vector is 0, not NaN', () => {
   const empty = new Map();
   assert.equal(cosine(empty, empty), 0);
+});
+
+test('classificationScore: same sub-industry > same industry > same sector > unrelated', () => {
+  const mu  = { sector: 'Technology', industry: 'Semiconductors', sub_industry: 'Memory & Storage', tags: ['memory', 'dram', 'nand', 'chips'] };
+  const wdc = { sector: 'Technology', industry: 'Semiconductors', sub_industry: 'Memory & Storage', tags: ['memory', 'storage', 'nand', 'drives'] };
+  const lrcx= { sector: 'Technology', industry: 'Semiconductors', sub_industry: 'Semiconductor Equipment', tags: ['chips', 'equipment', 'etch'] };
+  const msft= { sector: 'Technology', industry: 'Software', sub_industry: 'Systems Software', tags: ['cloud', 'software', 'azure'] };
+  const jpm = { sector: 'Financials', industry: 'Banks', sub_industry: 'Money-Center Banks', tags: ['banking', 'loans'] };
+
+  const sMemory = classificationScore(mu, wdc); // same sub-industry + tag overlap
+  const sEquip  = classificationScore(mu, lrcx); // same industry, different sub
+  const sSoft   = classificationScore(mu, msft); // same sector only
+  const sBank   = classificationScore(mu, jpm);  // nothing in common
+
+  assert.ok(sMemory > sEquip, `memory peer (${sMemory.toFixed(2)}) > equipment peer (${sEquip.toFixed(2)})`);
+  assert.ok(sEquip > sSoft, `same-industry (${sEquip.toFixed(2)}) > same-sector-only (${sSoft.toFixed(2)})`);
+  assert.ok(sSoft > sBank, `same-sector (${sSoft.toFixed(2)}) > unrelated (${sBank.toFixed(2)})`);
+  assert.equal(sBank, 0, 'no shared taxonomy level and no shared tags → 0');
+  assert.ok(sMemory <= 1 && sBank >= 0, 'score stays within 0..1');
+});
+
+test('tagJaccard: overlap fraction, 0 when either side empty', () => {
+  assert.equal(tagJaccard(['a', 'b'], ['a', 'b']), 1);
+  assert.equal(tagJaccard(['a', 'b', 'c', 'd'], ['a', 'b']), 2 / 4); // intersection 2 / union 4
+  assert.equal(tagJaccard([], ['a']), 0);
 });
 
 test('correlation: identical return series → +1; needs minimum overlap', () => {
