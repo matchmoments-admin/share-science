@@ -156,20 +156,34 @@ function parseTags(json: string | null): string[] {
   }
 }
 
-/** Blend the per-method scores already in the table into a 'blended' method (mean of present signals). */
+/**
+ * Blend the input signals into a 'blended' method. We REWARD CROSS-SIGNAL AGREEMENT: each pair's
+ * score = (sum of its scores across the active input signals) / (number of active signals) — so a
+ * missing signal counts as 0. A strong co-mover that isn't the same kind of business (in correlation's
+ * top-N but absent from classification) is correctly demoted, while a peer that's strong on both rises.
+ */
 export async function computeBlendedSimilar(env: Env): Promise<{ securities: number; pairs: number }> {
   const rows = (await env.DB.prepare(
-    `SELECT security_id, peer_id, AVG(score) AS score
-       FROM similar_securities WHERE method IN ('fundamental','correlation','classification')
-      GROUP BY security_id, peer_id`,
-  ).all<{ security_id: string; peer_id: string; score: number }>()).results ?? [];
+    `SELECT security_id, peer_id, method, score
+       FROM similar_securities WHERE method IN ('fundamental','correlation','classification')`,
+  ).all<{ security_id: string; peer_id: string; method: string; score: number }>()).results ?? [];
+
+  const k = new Set(rows.map((r) => r.method)).size || 1; // # of active input signals
+  const acc = new Map<string, Map<string, number>>(); // security_id → (peer_id → summed score)
+  for (const r of rows) {
+    let m = acc.get(r.security_id);
+    if (!m) { m = new Map(); acc.set(r.security_id, m); }
+    m.set(r.peer_id, (m.get(r.peer_id) ?? 0) + r.score);
+  }
 
   const peersById = new Map<string, Peer[]>();
-  for (const r of rows) {
-    const arr = peersById.get(r.security_id) ?? peersById.set(r.security_id, []).get(r.security_id)!;
-    arr.push({ peer_id: r.peer_id, score: r.score });
+  for (const [securityId, m] of acc) {
+    const arr = [...m.entries()]
+      .map(([peer_id, sum]) => ({ peer_id, score: sum / k }))
+      .sort((x, y) => y.score - x.score)
+      .slice(0, TOP_N);
+    peersById.set(securityId, arr);
   }
-  for (const [, arr] of peersById) { arr.sort((x, y) => y.score - x.score); arr.splice(TOP_N); }
   const pairs = await writeMethod(env, 'blended', peersById);
   return { securities: peersById.size, pairs };
 }
