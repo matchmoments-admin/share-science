@@ -416,6 +416,18 @@ async function handleBackfillFundamentals(req: Request, env: Env): Promise<Respo
   return json({ ok: true, ...r });
 }
 
+/** Admin diagnostic (read-only): report the EODHD subscription + whether fundamentals is reachable. */
+async function handleEodhdStatus(req: Request, env: Env): Promise<Response> {
+  if (!authed(req, env)) return json({ error: 'unauthorized' }, 401);
+  if (!env.EODHD_API_KEY) return json({ error: 'no_key' }, 400);
+  const user = await fetch(`https://eodhd.com/api/user?api_token=${env.EODHD_API_KEY}&fmt=json`);
+  const userBody = user.ok ? await user.json() : await user.text();
+  const fund = await fetch(`https://eodhd.com/api/fundamentals/AAPL.US?api_token=${env.EODHD_API_KEY}&fmt=json`);
+  const fundOk = fund.ok;
+  const fundSample = fundOk ? Object.keys((await fund.json()) as object).slice(0, 8) : await fund.text();
+  return json({ user: userBody, fundamentals: { status: fund.status, ok: fundOk, sample: fundSample } });
+}
+
 /** Admin: backfill real company names from the in-plan US symbol-list onto placeholder rows. */
 async function handleBackfillNames(req: Request, env: Env): Promise<Response> {
   if (!authed(req, env)) return json({ error: 'unauthorized' }, 401);
@@ -532,6 +544,7 @@ export default {
     if (url.pathname === '/admin/seed-universe' && req.method === 'POST') return handleSeedUniverse(req, env);
     if (url.pathname === '/admin/backfill-fundamentals' && req.method === 'POST') return handleBackfillFundamentals(req, env);
     if (url.pathname === '/admin/backfill-names' && req.method === 'POST') return handleBackfillNames(req, env);
+    if (url.pathname === '/admin/eodhd-status' && req.method === 'GET') return handleEodhdStatus(req, env);
     if (url.pathname === '/admin/recompute-similar' && req.method === 'POST') return handleRecomputeSimilar(req, env);
     if (url.pathname === '/admin/poll' && req.method === 'POST') return handlePoll(req, env);
     if (url.pathname === '/admin/backfill-tip-type' && req.method === 'POST') return handleBackfillTipType(req, env);
