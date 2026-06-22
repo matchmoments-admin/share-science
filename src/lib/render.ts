@@ -79,7 +79,7 @@ ${BRAND_HEAD}
 <div class="wrap">
 <header class="top">
   <a href="/" class="brand" style="text-decoration:none">Shareo<span class="dot">.</span></a>
-  <nav><a href="/leaderboard">Leaderboard</a><a href="/methodology">Methodology</a></nav>
+  <nav><a href="/leaderboard">Leaderboard</a><a href="/similar">Similar shares</a><a href="/methodology">Methodology</a></nav>
 </header>
 ${body}
 <footer>${escapeHtml(DISCLAIMER)}</footer>
