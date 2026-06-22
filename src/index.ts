@@ -23,7 +23,7 @@ import { pollPodcastSources } from './lib/producers/podcast.js';
 import { leaderboard, leaderboardJson, navJson, sourcePage, tipPage, securityPage, methodologyPage, similarPage, similarJson } from './lib/pages.js';
 import { seedUniverse, backfillFundamentals } from './lib/fundamentals.js';
 import { classifySecurities } from './lib/classify.js';
-import { recomputeSimilar } from './lib/similar.js';
+import { recomputeSimilar, debugCorrelation } from './lib/similar.js';
 import { landingPage, handleSubscribe, syncSubscribersToBeehiiv } from './lib/landing.js';
 import { generateAndStoreDigest, publishDigestToBeehiiv, sendTestDigest } from './lib/content.js';
 import { adminCookie, adminDashboard, adminApprovals, adminTrading, adminErrors, adminSources, adminAddTip, adminNewsletter, adminSubscribers, adminLoginPage, handleAdminLogin, handleAdminLogout } from './lib/admin.js';
@@ -446,6 +446,14 @@ async function handleClassifyUniverse(req: Request, env: Env): Promise<Response>
   return json({ ok: true, ...r });
 }
 
+/** Admin diagnostic (read-only): correlation series length + date overlaps for a ticker vs references. */
+async function handleCorrDebug(req: Request, env: Env): Promise<Response> {
+  if (!authed(req, env)) return json({ error: 'unauthorized' }, 401);
+  const t = (new URL(req.url).searchParams.get('ticker') || 'NVDA').toUpperCase();
+  const refs = ['WDC', 'LRCX', 'MU', 'MSFT', 'AAPL', 'AVGO'].filter((x) => x !== t);
+  return json(await debugCorrelation(env, [t, ...refs]));
+}
+
 /** Admin: recompute the similar-shares peer table on demand (same as the weekly cron). */
 async function handleRecomputeSimilar(req: Request, env: Env): Promise<Response> {
   if (!authed(req, env)) return json({ error: 'unauthorized' }, 401);
@@ -557,6 +565,7 @@ export default {
     if (url.pathname === '/admin/eodhd-status' && req.method === 'GET') return handleEodhdStatus(req, env);
     if (url.pathname === '/admin/classify-universe' && req.method === 'POST') return handleClassifyUniverse(req, env);
     if (url.pathname === '/admin/recompute-similar' && req.method === 'POST') return handleRecomputeSimilar(req, env);
+    if (url.pathname === '/admin/corr-debug' && req.method === 'GET') return handleCorrDebug(req, env);
     if (url.pathname === '/admin/poll' && req.method === 'POST') return handlePoll(req, env);
     if (url.pathname === '/admin/backfill-tip-type' && req.method === 'POST') return handleBackfillTipType(req, env);
 

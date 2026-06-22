@@ -15,7 +15,7 @@
  */
 import type { Env, Security } from '../types.js';
 import { nowISO, logOps } from './db.js';
-import { getAdjCloseSeries } from './prices.js';
+import { getAdjCloseSeries, eodhdSymbol } from './prices.js';
 import { eodhdWithinBudget } from './usage.js';
 import { type FundRow, type Peer, type ClassRow, zScoreGroup, cosine, correlation as pearson, classificationScore } from './similar-math.js';
 import { US_UNIVERSE } from './universe.js';
@@ -75,8 +75,13 @@ export async function computeCorrelationSimilar(env: Env, asOfISO?: string): Pro
     .filter((r) => universeIds.has(r.id) || (r.sector !== null && r.market_cap !== null))
     .slice(0, MAX_CORRELATION_SECURITIES);
 
-  // Fetch each series once (budget-gated). returns[id] = Map<date, logReturn>.
-  const series = new Map<string, { sector: string | null; ret: Map<string, number> }>();
+  // Fetch each series once (budget-gated). series[id] = Map<date, logReturn>.
+  // NOTE: correlation is NOT sector-gated. Co-movement is itself the signal, and `securities.sector`
+  // is only sparsely populated (legacy seed rows have it, bulk/universe rows are NULL) — gating on it
+  // would partition the universe and silently drop most peers (the NVDA-only-matches-MSFT/AAPL bug).
+  // The 'fundamental' signal does its own within-sector standardisation; the 'classification' signal
+  // carries the business grouping. Correlation stays cross-sector by design.
+  const series = new Map<string, Map<string, number>>();
   let aborted: string | undefined;
   for (const sec of rows) {
     if (!(await eodhdWithinBudget(env))) { aborted = 'eodhd_budget'; break; }
@@ -88,7 +93,7 @@ export async function computeCorrelationSimilar(env: Env, asOfISO?: string): Pro
         const cur = s.bars[i].adj;
         if (prev > 0 && cur > 0) ret.set(s.bars[i].date, Math.log(cur / prev));
       }
-      if (ret.size >= CORR_MIN_OVERLAP) series.set(sec.id, { sector: sec.sector, ret });
+      if (ret.size >= CORR_MIN_OVERLAP) series.set(sec.id, ret);
     } catch (err) {
       await logOps(env, 'warn', { at: 'computeCorrelationSimilar', sec: sec.id, err: String(err) });
     }
@@ -101,9 +106,7 @@ export async function computeCorrelationSimilar(env: Env, asOfISO?: string): Pro
     const scored: Peer[] = [];
     for (const b of ids) {
       if (b === a) continue;
-      const B = series.get(b)!;
-      if (B.sector !== A.sector) continue; // keep the sector gate consistent with (a)
-      const r = pearson(A.ret, B.ret, CORR_MIN_OVERLAP);
+      const r = pearson(A, series.get(b)!, CORR_MIN_OVERLAP);
       if (r === null) continue;
       scored.push({ peer_id: b, score: (r + 1) / 2 });
     }
@@ -212,6 +215,38 @@ async function writeMethod(env: Env, method: string, peersById: Map<string, Peer
   }
   for (let i = 0; i < binds.length; i += 100) await env.DB.batch(binds.slice(i, i + 100));
   return binds.length;
+}
+
+/** Read-only diagnostic: series length + return-date overlaps for a ticker vs a reference set. */
+export async function debugCorrelation(env: Env, tickers: string[]): Promise<Record<string, unknown>> {
+  const today = nowISO().slice(0, 10);
+  const from = isoMinusDays(today, 400);
+  const series: Record<string, any> = {};
+  const rets: Record<string, Map<string, number>> = {};
+  for (const t of tickers) {
+    const sec = await env.DB.prepare(
+      `SELECT id, ticker, exchange, isin, name, sec_type, domicile, currency, is_active FROM securities
+        WHERE ticker = ? AND exchange IN ${US_EXCHANGES} LIMIT 1`,
+    ).bind(t.toUpperCase()).first<Security>();
+    if (!sec) { series[t] = { error: 'not_found' }; continue; }
+    try {
+      const s = await getAdjCloseSeries(env, sec, from, today);
+      const ret = new Map<string, number>();
+      for (let i = 1; i < s.bars.length; i++) {
+        const p = s.bars[i - 1].adj; const c = s.bars[i].adj;
+        if (p > 0 && c > 0) ret.set(s.bars[i].date, Math.log(c / p));
+      }
+      rets[t] = ret;
+      series[t] = { symbol: eodhdSymbol(sec), exchange: sec.exchange, bars: s.bars.length, retSize: ret.size, first: s.bars[0]?.date, last: s.bars[s.bars.length - 1]?.date };
+    } catch (e) { series[t] = { error: String(e) }; }
+  }
+  const base = tickers[0];
+  const overlaps: Record<string, number> = {};
+  if (rets[base]) for (const t of tickers) if (t !== base && rets[t]) {
+    let n = 0; for (const d of rets[base].keys()) if (rets[t]!.has(d)) n++;
+    overlaps[t] = n;
+  }
+  return { window: { from, today }, minOverlap: CORR_MIN_OVERLAP, series, overlapsVsBase: { base, overlaps } };
 }
 
 function isoMinusDays(dateISO: string, days: number): string {
