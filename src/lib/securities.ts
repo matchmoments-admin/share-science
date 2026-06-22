@@ -62,6 +62,35 @@ export async function seedExchange(env: Env, exchange: string, max = 20000): Pro
 }
 
 /**
+ * Backfill real company names from the in-plan exchange-symbol-list (ONE EODHD call) onto rows that
+ * still carry a placeholder name (name = ticker), e.g. universe seeds. Cheap + idempotent — used so
+ * the similar-shares page reads properly without the (plan-gated) fundamentals API. US-market only.
+ */
+export async function backfillNames(env: Env): Promise<{ fetched: number; updated: number }> {
+  if (!env.EODHD_API_KEY) throw new Error('EODHD_API_KEY not set');
+  const url = `https://eodhd.com/api/exchange-symbol-list/US?api_token=${env.EODHD_API_KEY}&fmt=json`;
+  const resp = await fetch(url);
+  if (!resp.ok) throw new Error(`EODHD symbol-list US ${resp.status}`);
+  const all = (await resp.json()) as EodhdSymbol[];
+  const nameByCode = new Map<string, string>();
+  for (const s of Array.isArray(all) ? all : []) if (s.Code && s.Name) nameByCode.set(s.Code.toUpperCase(), s.Name);
+
+  // Only rows where the name is still a placeholder (= ticker) and the exchange is a US market.
+  const rows = (await env.DB.prepare(
+    `SELECT id, ticker FROM securities
+      WHERE exchange IN ('US','XNAS','XNYS','ARCX','BATS') AND name = ticker`,
+  ).all<{ id: string; ticker: string }>()).results ?? [];
+  const stmt = env.DB.prepare('UPDATE securities SET name = ? WHERE id = ?');
+  const binds = rows
+    .map((r) => ({ id: r.id, name: nameByCode.get(r.ticker.toUpperCase()) }))
+    .filter((r): r is { id: string; name: string } => !!r.name)
+    .map((r) => stmt.bind(r.name, r.id));
+  for (let i = 0; i < binds.length; i += 100) await env.DB.batch(binds.slice(i, i + 100));
+  await logOps(env, 'cron', { job: 'backfillNames', fetched: Array.isArray(all) ? all.length : 0, candidates: rows.length, updated: binds.length });
+  return { fetched: Array.isArray(all) ? all.length : 0, updated: binds.length };
+}
+
+/**
  * Lazy single-ticker lookup on a resolution miss. Returns a confirmed Security (and inserts it)
  * only on a UNIQUE, exact-code match; otherwise null (caller abstains). Bounded by one EODHD call.
  */

@@ -295,3 +295,131 @@ export async function securityPage(env: Env, ticker: string): Promise<Response> 
   return layout(`${sec.ticker} — who called it`, `<h1>${escapeHtml(sec.ticker)} <span class="muted">${escapeHtml(sec.name)}</span></h1>
     <p class="muted">${escapeHtml(sec.exchange)}</p>${table}`);
 }
+
+// ── Find Similar Shares ──────────────────────────────────────────────
+const SIMILAR_METHODS = ['blended', 'fundamental', 'correlation'];
+const SIMILAR_METHOD_LABELS: Record<string, string> = {
+  blended: 'Blended', fundamental: 'Fundamental factors', correlation: 'Price co-movement',
+};
+
+interface PeerRow {
+  peer_id: string; score: number; rank: number;
+  ticker: string; name: string; sector: string | null;
+}
+interface Overlay { n_calls: number; n_sources: number; best_alpha: number | null }
+
+/** Resolve a US security + its precomputed peers for a method (falls back blended→fundamental). */
+async function loadSimilar(env: Env, ticker: string, methodParam?: string | null): Promise<
+  { sec: any; method: string; peers: PeerRow[]; overlay: Map<string, Overlay> } | null
+> {
+  // US-market exchanges as stored (legacy XNAS/XNYS vs the EODHD 'US' code) — must match similar.ts.
+  const sec = await env.DB.prepare(
+    `SELECT id, ticker, name, sector, exchange FROM securities
+      WHERE ticker = ? AND exchange IN ('US','XNAS','XNYS','ARCX','BATS') LIMIT 1`,
+  ).bind(ticker.toUpperCase()).first<any>();
+  if (!sec) return null;
+
+  let method = methodParam && SIMILAR_METHODS.includes(methodParam) ? methodParam : 'blended';
+  const peerQuery = (m: string) => env.DB.prepare(
+    `SELECT ss.peer_id, ss.score, ss.rank, sec.ticker, sec.name, sec.sector
+       FROM similar_securities ss JOIN securities sec ON sec.id = ss.peer_id
+      WHERE ss.security_id = ? AND ss.method = ? ORDER BY ss.rank ASC`,
+  ).bind(sec.id, m).all<PeerRow>();
+  let peers = (await peerQuery(method)).results ?? [];
+  if (peers.length === 0 && method === 'blended') { method = 'fundamental'; peers = (await peerQuery(method)).results ?? []; }
+
+  // Tipster overlay — for each peer, how many tracked calls + best 90d alpha by any source (derived only).
+  const overlay = new Map<string, Overlay>();
+  if (peers.length) {
+    const ids = peers.map((p) => p.peer_id);
+    const ph = ids.map(() => '?').join(',');
+    const rows = (await env.DB.prepare(
+      `SELECT t.security_id, COUNT(DISTINCT t.id) AS n_calls, COUNT(DISTINCT t.source_id) AS n_sources,
+              MAX(tr.excess_pct) AS best_alpha
+         FROM tips t LEFT JOIN tip_returns tr ON tr.tip_id = t.id AND tr.horizon_days = 90
+        WHERE t.security_id IN (${ph}) GROUP BY t.security_id`,
+    ).bind(...ids).all<{ security_id: string; n_calls: number; n_sources: number; best_alpha: number | null }>()).results ?? [];
+    for (const r of rows) overlay.set(r.security_id, { n_calls: r.n_calls, n_sources: r.n_sources, best_alpha: r.best_alpha });
+  }
+  return { sec, method, peers, overlay };
+}
+
+export async function similarPage(env: Env, tickerParam?: string | null, methodParam?: string | null): Promise<Response> {
+  const ticker = (tickerParam || '').trim();
+  const form = `<form method="get" action="/similar" class="similar-form">
+      <input name="ticker" placeholder="Enter a US ticker, e.g. MU" value="${escapeHtml(ticker.toUpperCase())}" />
+      <button type="submit">Find similar</button>
+    </form>`;
+  const intro = `<h1>Find similar shares</h1>
+    <p class="muted">Enter a US-listed ticker to see shares with similar financial characteristics and price
+      behaviour — and which tracked tipsters have called them. Descriptive information, not a recommendation.</p>${form}`;
+
+  if (!ticker) return layout('Find similar shares', intro +
+    `<p class="muted">Try <a href="/similar?ticker=MU">MU</a>, <a href="/similar?ticker=NVDA">NVDA</a>, or <a href="/similar?ticker=JPM">JPM</a>.</p>`);
+
+  const data = await loadSimilar(env, ticker, methodParam);
+  if (!data) return layout('Find similar shares', intro +
+    `<p class="muted">No US security found for <b>${escapeHtml(ticker.toUpperCase())}</b> in our universe yet.</p>`);
+  const { sec, method, peers, overlay } = data;
+  assertNoRawPrices(env, { peers, overlay: [...overlay.values()] });
+
+  if (peers.length === 0) {
+    return layout(`Similar to ${sec.ticker}`, intro +
+      `<h2>${escapeHtml(sec.ticker)} <span class="muted">${escapeHtml(sec.name)}</span></h2>
+       <p class="muted">Similar shares haven't been computed for this security yet — check back after the next refresh.</p>`);
+  }
+
+  const switcher = `<p class="muted">Signal: ${SIMILAR_METHODS.map((m) =>
+    m === method ? `<b>${escapeHtml(SIMILAR_METHOD_LABELS[m])}</b>`
+      : `<a href="/similar?ticker=${encodeURIComponent(sec.ticker)}&method=${m}">${escapeHtml(SIMILAR_METHOD_LABELS[m])}</a>`,
+  ).join(' · ')}</p>`;
+
+  const rowsHtml = peers.map((p) => {
+    const o = overlay.get(p.peer_id);
+    const tipster = o && o.n_calls > 0
+      ? `${o.n_calls} call${o.n_calls === 1 ? '' : 's'} · ${o.n_sources} source${o.n_sources === 1 ? '' : 's'}` +
+        (o.best_alpha !== null ? ` · best 90d alpha ${(o.best_alpha * 100).toFixed(1)}%` : '')
+      : '<span class="muted">no tracked calls</span>';
+    return `<tr>
+      <td>${p.rank}</td>
+      <td><a href="/securities/${encodeURIComponent(p.ticker)}">${escapeHtml(p.ticker)}</a></td>
+      <td>${escapeHtml(p.name)}</td>
+      <td class="muted">${escapeHtml(p.sector || '—')}</td>
+      <td>${score(p.score * 100)}</td>
+      <td>${tipster} ${o && o.n_calls > 0 ? `<a class="muted" href="/securities/${encodeURIComponent(p.ticker)}">view</a>` : ''}</td>
+    </tr>`;
+  }).join('');
+
+  return layout(`Similar to ${sec.ticker}`, intro +
+    `<h2>Shares similar to ${escapeHtml(sec.ticker)} <span class="muted">${escapeHtml(sec.name)}${sec.sector ? ' · ' + escapeHtml(sec.sector) : ''}</span></h2>
+     ${switcher}
+     <table><thead><tr><th>#</th><th>Ticker</th><th>Company</th><th>Sector</th>
+       <th>Similarity</th><th>Tracked tipster calls</th></tr></thead><tbody>${rowsHtml}</tbody></table>
+     <p class="muted">"Similarity" is a 0–100 index from ${escapeHtml(SIMILAR_METHOD_LABELS[method].toLowerCase())}
+       (higher = more alike), computed within ${escapeHtml(sec.sector || 'the sector')}. The tipster column shows how many
+       tracked public calls each peer has and the best 90-day alpha among them — historical, measured outcomes.
+       <a href="/methodology">How outcomes are measured</a>.</p>
+     <p class="muted">${escapeHtml(HYPOTHETICAL_NOTE)} This is general information about financial characteristics, not a
+       recommendation to buy, sell, or switch between any securities.</p>`);
+}
+
+export async function similarJson(env: Env, tickerParam?: string | null, methodParam?: string | null): Promise<Response> {
+  const ticker = (tickerParam || '').trim();
+  if (!ticker) return json({ error: 'missing ?ticker=' }, 400);
+  const data = await loadSimilar(env, ticker, methodParam);
+  if (!data) return json({ error: 'not_found', ticker: ticker.toUpperCase() }, 404);
+  const { sec, method, peers, overlay } = data;
+  const out = peers.map((p) => {
+    const o = overlay.get(p.peer_id);
+    return {
+      ticker: p.ticker, name: p.name, sector: p.sector, rank: p.rank,
+      similarity: Math.round(p.score * 1000) / 10, // 0..100, 1dp
+      tipster: { n_calls: o?.n_calls ?? 0, n_sources: o?.n_sources ?? 0, best_90d_alpha_pct: o?.best_alpha ?? null },
+    };
+  });
+  assertNoRawPrices(env, out);
+  return json({
+    query: { ticker: sec.ticker, name: sec.name, sector: sec.sector }, method,
+    hypothetical: true, disclaimer: HYPOTHETICAL_NOTE, peers: out,
+  });
+}
