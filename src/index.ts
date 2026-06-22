@@ -22,6 +22,7 @@ import { pollBlueskySources } from './lib/producers/bluesky.js';
 import { pollPodcastSources } from './lib/producers/podcast.js';
 import { leaderboard, leaderboardJson, navJson, sourcePage, tipPage, securityPage, methodologyPage, similarPage, similarJson } from './lib/pages.js';
 import { seedUniverse, backfillFundamentals } from './lib/fundamentals.js';
+import { classifySecurities } from './lib/classify.js';
 import { recomputeSimilar } from './lib/similar.js';
 import { landingPage, handleSubscribe, syncSubscribersToBeehiiv } from './lib/landing.js';
 import { generateAndStoreDigest, publishDigestToBeehiiv, sendTestDigest } from './lib/content.js';
@@ -436,6 +437,15 @@ async function handleBackfillNames(req: Request, env: Env): Promise<Response> {
   return json({ ok: true, ...r });
 }
 
+/** Admin: classify universe securities by business (industry/sub-industry/tags) via the LLM. Bounded per call (?limit) + budget-gated — re-run until remaining=0. */
+async function handleClassifyUniverse(req: Request, env: Env): Promise<Response> {
+  if (!authed(req, env)) return json({ error: 'unauthorized' }, 401);
+  const limit = Number(new URL(req.url).searchParams.get('limit')) || undefined;
+  const r = await classifySecurities(env, limit);
+  await logAdmin(env, '/admin/classify-universe', r);
+  return json({ ok: true, ...r });
+}
+
 /** Admin: recompute the similar-shares peer table on demand (same as the weekly cron). */
 async function handleRecomputeSimilar(req: Request, env: Env): Promise<Response> {
   if (!authed(req, env)) return json({ error: 'unauthorized' }, 401);
@@ -545,6 +555,7 @@ export default {
     if (url.pathname === '/admin/backfill-fundamentals' && req.method === 'POST') return handleBackfillFundamentals(req, env);
     if (url.pathname === '/admin/backfill-names' && req.method === 'POST') return handleBackfillNames(req, env);
     if (url.pathname === '/admin/eodhd-status' && req.method === 'GET') return handleEodhdStatus(req, env);
+    if (url.pathname === '/admin/classify-universe' && req.method === 'POST') return handleClassifyUniverse(req, env);
     if (url.pathname === '/admin/recompute-similar' && req.method === 'POST') return handleRecomputeSimilar(req, env);
     if (url.pathname === '/admin/poll' && req.method === 'POST') return handlePoll(req, env);
     if (url.pathname === '/admin/backfill-tip-type' && req.method === 'POST') return handleBackfillTipType(req, env);

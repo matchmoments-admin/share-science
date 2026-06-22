@@ -17,7 +17,7 @@ import type { Env, Security } from '../types.js';
 import { nowISO, logOps } from './db.js';
 import { getAdjCloseSeries } from './prices.js';
 import { eodhdWithinBudget } from './usage.js';
-import { type FundRow, type Peer, zScoreGroup, cosine, correlation as pearson } from './similar-math.js';
+import { type FundRow, type Peer, type ClassRow, zScoreGroup, cosine, correlation as pearson, classificationScore } from './similar-math.js';
 import { US_UNIVERSE } from './universe.js';
 
 const TOP_N = 12;
@@ -115,31 +115,87 @@ export async function computeCorrelationSimilar(env: Env, asOfISO?: string): Pro
   return { securities: peersById.size, pairs, aborted };
 }
 
-/** Blend the per-method scores already in the table into a 'blended' method (mean of present signals). */
-export async function computeBlendedSimilar(env: Env): Promise<{ securities: number; pairs: number }> {
-  const rows = (await env.DB.prepare(
-    `SELECT security_id, peer_id, AVG(score) AS score
-       FROM similar_securities WHERE method IN ('fundamental','correlation')
-      GROUP BY security_id, peer_id`,
-  ).all<{ security_id: string; peer_id: string; score: number }>()).results ?? [];
+/**
+ * (c) Business-classification NN — from the LLM taxonomy in security_classification. Tiered match
+ * (sub-industry > industry > sector) + tag Jaccard. Pure D1 + math — no external calls. Answers
+ * "is it the same kind of company?" (drops co-movers that aren't actually in the business).
+ */
+export async function computeClassificationSimilar(env: Env): Promise<{ securities: number; pairs: number }> {
+  const raw = (await env.DB.prepare(
+    `SELECT c.security_id, c.sector, c.industry, c.sub_industry, c.business_tags
+       FROM security_classification c JOIN securities s ON s.id = c.security_id
+      WHERE s.exchange IN ${US_EXCHANGES} AND s.is_active = 1`,
+  ).all<{ security_id: string; sector: string | null; industry: string | null; sub_industry: string | null; business_tags: string | null }>()).results ?? [];
+
+  const rows = raw.map((r) => ({
+    id: r.security_id,
+    cls: { sector: r.sector, industry: r.industry, sub_industry: r.sub_industry, tags: parseTags(r.business_tags) } as ClassRow,
+  }));
 
   const peersById = new Map<string, Peer[]>();
-  for (const r of rows) {
-    const arr = peersById.get(r.security_id) ?? peersById.set(r.security_id, []).get(r.security_id)!;
-    arr.push({ peer_id: r.peer_id, score: r.score });
+  for (const a of rows) {
+    const scored = rows
+      .filter((b) => b.id !== a.id)
+      .map((b) => ({ peer_id: b.id, score: classificationScore(a.cls, b.cls) }))
+      .filter((p) => p.score > 0) // unrelated → drop (don't pad the list with zero-score names)
+      .sort((x, y) => y.score - x.score)
+      .slice(0, TOP_N);
+    if (scored.length) peersById.set(a.id, scored);
   }
-  for (const [, arr] of peersById) { arr.sort((x, y) => y.score - x.score); arr.splice(TOP_N); }
+  const pairs = await writeMethod(env, 'classification', peersById);
+  return { securities: peersById.size, pairs };
+}
+
+function parseTags(json: string | null): string[] {
+  if (!json) return [];
+  try {
+    const v = JSON.parse(json);
+    return Array.isArray(v) ? v.filter((t): t is string => typeof t === 'string') : [];
+  } catch {
+    return [];
+  }
+}
+
+/**
+ * Blend the input signals into a 'blended' method. We REWARD CROSS-SIGNAL AGREEMENT: each pair's
+ * score = (sum of its scores across the active input signals) / (number of active signals) — so a
+ * missing signal counts as 0. A strong co-mover that isn't the same kind of business (in correlation's
+ * top-N but absent from classification) is correctly demoted, while a peer that's strong on both rises.
+ */
+export async function computeBlendedSimilar(env: Env): Promise<{ securities: number; pairs: number }> {
+  const rows = (await env.DB.prepare(
+    `SELECT security_id, peer_id, method, score
+       FROM similar_securities WHERE method IN ('fundamental','correlation','classification')`,
+  ).all<{ security_id: string; peer_id: string; method: string; score: number }>()).results ?? [];
+
+  const k = new Set(rows.map((r) => r.method)).size || 1; // # of active input signals
+  const acc = new Map<string, Map<string, number>>(); // security_id → (peer_id → summed score)
+  for (const r of rows) {
+    let m = acc.get(r.security_id);
+    if (!m) { m = new Map(); acc.set(r.security_id, m); }
+    m.set(r.peer_id, (m.get(r.peer_id) ?? 0) + r.score);
+  }
+
+  const peersById = new Map<string, Peer[]>();
+  for (const [securityId, m] of acc) {
+    const arr = [...m.entries()]
+      .map(([peer_id, sum]) => ({ peer_id, score: sum / k }))
+      .sort((x, y) => y.score - x.score)
+      .slice(0, TOP_N);
+    peersById.set(securityId, arr);
+  }
   const pairs = await writeMethod(env, 'blended', peersById);
   return { securities: peersById.size, pairs };
 }
 
-/** Full weekly recompute: fundamental → correlation → blended. */
+/** Full weekly recompute: fundamental → correlation → classification → blended. */
 export async function recomputeSimilar(env: Env): Promise<Record<string, unknown>> {
   const fundamental = await computeFundamentalSimilar(env);
   const correlation = await computeCorrelationSimilar(env);
+  const classification = await computeClassificationSimilar(env);
   const blended = await computeBlendedSimilar(env);
-  await logOps(env, 'cron', { job: 'recomputeSimilar', fundamental, correlation, blended });
-  return { fundamental, correlation, blended };
+  await logOps(env, 'cron', { job: 'recomputeSimilar', fundamental, correlation, classification, blended });
+  return { fundamental, correlation, classification, blended };
 }
 
 /** Idempotent per-method replace: delete this method's rows, insert the fresh top-N (ranked). */
