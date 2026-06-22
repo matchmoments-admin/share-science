@@ -20,7 +20,9 @@ import { classifyHorizon } from './lib/horizon.js';
 import { pollRssSources } from './lib/producers/rss.js';
 import { pollBlueskySources } from './lib/producers/bluesky.js';
 import { pollPodcastSources } from './lib/producers/podcast.js';
-import { leaderboard, leaderboardJson, navJson, sourcePage, tipPage, securityPage, methodologyPage } from './lib/pages.js';
+import { leaderboard, leaderboardJson, navJson, sourcePage, tipPage, securityPage, methodologyPage, similarPage, similarJson } from './lib/pages.js';
+import { seedUniverse, backfillFundamentals } from './lib/fundamentals.js';
+import { recomputeSimilar } from './lib/similar.js';
 import { landingPage, handleSubscribe, syncSubscribersToBeehiiv } from './lib/landing.js';
 import { generateAndStoreDigest, publishDigestToBeehiiv, sendTestDigest } from './lib/content.js';
 import { adminCookie, adminDashboard, adminApprovals, adminTrading, adminErrors, adminSources, adminAddTip, adminNewsletter, adminSubscribers, adminLoginPage, handleAdminLogin, handleAdminLogout } from './lib/admin.js';
@@ -397,6 +399,31 @@ async function handleBackfillTipType(req: Request, env: Env): Promise<Response> 
   return json({ ok: true, scanned: rows.length, updated, more: rows.length === limit });
 }
 
+/** Admin: seed the curated US universe into securities (idempotent, no external calls). */
+async function handleSeedUniverse(req: Request, env: Env): Promise<Response> {
+  if (!authed(req, env)) return json({ error: 'unauthorized' }, 401);
+  const r = await seedUniverse(env);
+  await logAdmin(env, '/admin/seed-universe', r);
+  return json({ ok: true, ...r });
+}
+
+/** Admin: backfill EODHD fundamentals onto US securities. Bounded per call (?limit) + budget-gated — re-run until remaining=0. */
+async function handleBackfillFundamentals(req: Request, env: Env): Promise<Response> {
+  if (!authed(req, env)) return json({ error: 'unauthorized' }, 401);
+  const limit = Number(new URL(req.url).searchParams.get('limit')) || undefined;
+  const r = await backfillFundamentals(env, limit);
+  await logAdmin(env, '/admin/backfill-fundamentals', r);
+  return json({ ok: true, ...r });
+}
+
+/** Admin: recompute the similar-shares peer table on demand (same as the weekly cron). */
+async function handleRecomputeSimilar(req: Request, env: Env): Promise<Response> {
+  if (!authed(req, env)) return json({ error: 'unauthorized' }, 401);
+  const r = await recomputeSimilar(env);
+  await logAdmin(env, '/admin/recompute-similar', r);
+  return json({ ok: true, ...r });
+}
+
 /** Admin: run the producer pollers on demand (same as the hourly cron). */
 async function handlePoll(req: Request, env: Env): Promise<Response> {
   if (!authed(req, env)) return json({ error: 'unauthorized' }, 401);
@@ -494,6 +521,9 @@ export default {
     if (url.pathname === '/admin/send-test-digest' && req.method === 'POST') return handleSendTestDigest(req, env);
     if (url.pathname === '/admin/sync-subscribers' && req.method === 'POST') return handleSyncSubscribers(req, env);
     if (url.pathname === '/admin/seed-securities' && req.method === 'POST') return handleSeedSecurities(req, env);
+    if (url.pathname === '/admin/seed-universe' && req.method === 'POST') return handleSeedUniverse(req, env);
+    if (url.pathname === '/admin/backfill-fundamentals' && req.method === 'POST') return handleBackfillFundamentals(req, env);
+    if (url.pathname === '/admin/recompute-similar' && req.method === 'POST') return handleRecomputeSimilar(req, env);
     if (url.pathname === '/admin/poll' && req.method === 'POST') return handlePoll(req, env);
     if (url.pathname === '/admin/backfill-tip-type' && req.method === 'POST') return handleBackfillTipType(req, env);
 
@@ -504,6 +534,8 @@ export default {
     // Public, crawlable read surface (derived returns only — assertNoRawPrices-guarded).
     if (url.pathname === '/leaderboard') return leaderboard(env, url.searchParams.get('dim'));
     if (url.pathname === '/methodology') return methodologyPage();
+    if (url.pathname === '/similar') return similarPage(env, url.searchParams.get('ticker'), url.searchParams.get('method'));
+    if (url.pathname === '/api/public/similar') return similarJson(env, url.searchParams.get('ticker'), url.searchParams.get('method'));
     if (url.pathname === '/api/public/leaderboard') return leaderboardJson(env, url.searchParams.get('dim'));
     if (url.pathname === '/api/public/nav') return navJson(env, new URL(req.url).searchParams.get('scope') || 'all');
     const m = url.pathname.match(/^\/(sources|tips|securities)\/(.+)$/);
@@ -549,11 +581,13 @@ export default {
       const synced = await syncSubscribersToBeehiiv(env);
       await logOps(env, 'cron', { job: 'daily', ...opened, trades, ...valued, ...risk, nav, ...rated, beehiiv: synced });
     } else {
+      // Refresh the similar-shares peer table (fundamental = free; correlation = bounded + EODHD-budget-gated).
+      const similar = await recomputeSimilar(env);
       const digest = await generateAndStoreDigest(env);
       // On a real (non-quiet, non-cached) issue, also create the beehiiv DRAFT so the founder just
       // reviews + sends — never auto-sends. Idempotent on week, fail-closed, no-ops if beehiiv unconfigured.
       const published = digest.ok ? await publishDigestToBeehiiv(env) : null;
-      await logOps(env, 'cron', { job: 'weekly', ...digest, beehiiv: published?.ok ? 'drafted' : published?.reason ?? 'skipped' });
+      await logOps(env, 'cron', { job: 'weekly', similar, ...digest, beehiiv: published?.ok ? 'drafted' : published?.reason ?? 'skipped' });
     }
   },
 };
