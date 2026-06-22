@@ -11,7 +11,7 @@ import { spentTodayCents, withinBudget, recordSpend, eodhdCallsToday, eodhdCallB
 import { ingest, verifyHmac, type IngestInput } from './lib/ingest.js';
 import { extractTips } from './lib/extract.js';
 import { resolveSecurity } from './lib/resolve.js';
-import { seedExchange } from './lib/securities.js';
+import { seedExchange, backfillNames } from './lib/securities.js';
 import { openPendingPositions, executeApprovedTrades } from './lib/trade.js';
 import { valueOpenPositions, recomputeRiskMetrics } from './lib/track.js';
 import { recomputeRatings } from './lib/ratings.js';
@@ -416,6 +416,14 @@ async function handleBackfillFundamentals(req: Request, env: Env): Promise<Respo
   return json({ ok: true, ...r });
 }
 
+/** Admin: backfill real company names from the in-plan US symbol-list onto placeholder rows. */
+async function handleBackfillNames(req: Request, env: Env): Promise<Response> {
+  if (!authed(req, env)) return json({ error: 'unauthorized' }, 401);
+  const r = await backfillNames(env);
+  await logAdmin(env, '/admin/backfill-names', r);
+  return json({ ok: true, ...r });
+}
+
 /** Admin: recompute the similar-shares peer table on demand (same as the weekly cron). */
 async function handleRecomputeSimilar(req: Request, env: Env): Promise<Response> {
   if (!authed(req, env)) return json({ error: 'unauthorized' }, 401);
@@ -523,6 +531,7 @@ export default {
     if (url.pathname === '/admin/seed-securities' && req.method === 'POST') return handleSeedSecurities(req, env);
     if (url.pathname === '/admin/seed-universe' && req.method === 'POST') return handleSeedUniverse(req, env);
     if (url.pathname === '/admin/backfill-fundamentals' && req.method === 'POST') return handleBackfillFundamentals(req, env);
+    if (url.pathname === '/admin/backfill-names' && req.method === 'POST') return handleBackfillNames(req, env);
     if (url.pathname === '/admin/recompute-similar' && req.method === 'POST') return handleRecomputeSimilar(req, env);
     if (url.pathname === '/admin/poll' && req.method === 'POST') return handlePoll(req, env);
     if (url.pathname === '/admin/backfill-tip-type' && req.method === 'POST') return handleBackfillTipType(req, env);

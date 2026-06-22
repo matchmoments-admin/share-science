@@ -312,8 +312,10 @@ interface Overlay { n_calls: number; n_sources: number; best_alpha: number | nul
 async function loadSimilar(env: Env, ticker: string, methodParam?: string | null): Promise<
   { sec: any; method: string; peers: PeerRow[]; overlay: Map<string, Overlay> } | null
 > {
+  // US-market exchanges as stored (legacy XNAS/XNYS vs the EODHD 'US' code) — must match similar.ts.
   const sec = await env.DB.prepare(
-    `SELECT id, ticker, name, sector, exchange FROM securities WHERE ticker = ? AND exchange = 'US' LIMIT 1`,
+    `SELECT id, ticker, name, sector, exchange FROM securities
+      WHERE ticker = ? AND exchange IN ('US','XNAS','XNYS','ARCX','BATS') LIMIT 1`,
   ).bind(ticker.toUpperCase()).first<any>();
   if (!sec) return null;
 

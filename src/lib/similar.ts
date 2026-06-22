@@ -18,10 +18,15 @@ import { nowISO, logOps } from './db.js';
 import { getAdjCloseSeries } from './prices.js';
 import { eodhdWithinBudget } from './usage.js';
 import { type FundRow, type Peer, zScoreGroup, cosine, correlation as pearson } from './similar-math.js';
+import { US_UNIVERSE } from './universe.js';
 
 const TOP_N = 12;
 const MAX_CORRELATION_SECURITIES = 220; // bound EODHD series fetches per recompute
 const CORR_MIN_OVERLAP = 60; // need ≥60 common trading days for a meaningful correlation
+// US-market exchanges as stored on securities — legacy seed rows use XNAS/XNYS codes, lazy/universe
+// rows use the EODHD 'US' code. prices.ts maps all of these to the same `.US` symbol, so similarity
+// must treat them as one market (else liquid legacy names like NVDA/AAPL silently drop out).
+const US_EXCHANGES = `('US','XNAS','XNYS','ARCX','BATS')`;
 
 /** (a) Fundamental factor cosine NN within sector. Pure D1 + math — no external calls. */
 export async function computeFundamentalSimilar(env: Env): Promise<{ securities: number; pairs: number }> {
@@ -29,7 +34,7 @@ export async function computeFundamentalSimilar(env: Env): Promise<{ securities:
     `SELECT id, ticker, sector, market_cap,
             pe, pb, ps, profit_margin AS margin, roe, rev_growth AS growth, debt_equity AS de, beta
        FROM securities
-      WHERE exchange = 'US' AND sector IS NOT NULL AND market_cap IS NOT NULL`,
+      WHERE exchange IN ${US_EXCHANGES} AND sector IS NOT NULL AND market_cap IS NOT NULL`,
   ).all<FundRow & { market_cap: number | null }>()).results ?? [];
   // log-size in JS (don't rely on SQLite's optional log() build flag).
   const rows: FundRow[] = raw.map((r) => ({ ...r, mcap_log: r.market_cap && r.market_cap > 0 ? Math.log(r.market_cap) : null }));
@@ -58,15 +63,20 @@ export async function computeFundamentalSimilar(env: Env): Promise<{ securities:
 export async function computeCorrelationSimilar(env: Env, asOfISO?: string): Promise<{ securities: number; pairs: number; aborted?: string }> {
   const today = (asOfISO ?? nowISO()).slice(0, 10);
   const from = isoMinusDays(today, 400);
-  const rows = (await env.DB.prepare(
-    `SELECT id, ticker, exchange, isin, name, sec_type, domicile, currency, is_active, sector
-       FROM securities
-      WHERE exchange = 'US' AND sector IS NOT NULL AND market_cap IS NOT NULL
-      ORDER BY market_cap DESC LIMIT ?`,
-  ).bind(MAX_CORRELATION_SECURITIES).all<Security & { sector: string }>()).results ?? [];
+  // Candidate universe = the curated liquid seed set ∪ anything with fundamentals (post-upgrade the
+  // sector gate + fundamental blend kick in automatically). Correlation only needs EOD prices, which
+  // are in-plan today, so this method ships without the (plan-gated) fundamentals API.
+  const universeIds = new Set(US_UNIVERSE.map((t) => `${t}.US`));
+  const all = (await env.DB.prepare(
+    `SELECT id, ticker, exchange, isin, name, sec_type, domicile, currency, is_active, sector, market_cap
+       FROM securities WHERE exchange IN ${US_EXCHANGES} AND is_active = 1 ORDER BY id`,
+  ).all<Security & { sector: string | null; market_cap: number | null }>()).results ?? [];
+  const rows = all
+    .filter((r) => universeIds.has(r.id) || (r.sector !== null && r.market_cap !== null))
+    .slice(0, MAX_CORRELATION_SECURITIES);
 
   // Fetch each series once (budget-gated). returns[id] = Map<date, logReturn>.
-  const series = new Map<string, { sector: string; ret: Map<string, number> }>();
+  const series = new Map<string, { sector: string | null; ret: Map<string, number> }>();
   let aborted: string | undefined;
   for (const sec of rows) {
     if (!(await eodhdWithinBudget(env))) { aborted = 'eodhd_budget'; break; }
